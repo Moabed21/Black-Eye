@@ -1,9 +1,11 @@
 package tabs
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -17,20 +19,35 @@ import (
 	"blackeye/internal/ui/styles"
 )
 
+type dockerActionMsg struct {
+	action string
+	err    error
+}
+
+type dockerLogsMsg struct {
+	lines []string
+	err   error
+}
+
 // Docker is the Tab 4 model.
 type Docker struct {
 	width, height int
 	cfg           config.Config
 	sub           <-chan interface{}
 	auditSvc      *audit.Service
+	dockerSvc     *dockersvc.Service
 
 	snap       *dockersvc.Snapshot
 	cursor     int
 	detailMode bool
 	logMode    bool
 
-	// Scroll state for detail panel
+	// Scroll state for detail/log panels
 	detailScroll int
+	logLines     []string
+	logLoading   bool
+	logError     string
+	statusMsg    string
 
 	// Action dialog.
 	actionMode   int // 0=none 1=stop confirm 2=restart confirm
@@ -42,24 +59,36 @@ func NewDocker(b *bus.Bus, cfg config.Config) *Docker {
 	return d
 }
 
-func (d *Docker) SetAudit(a *audit.Service) { d.auditSvc = a }
+func (d *Docker) SetAudit(a *audit.Service)   { d.auditSvc = a }
+func (d *Docker) SetDocker(s *dockersvc.Service) { d.dockerSvc = s }
 
-func (d *Docker) Init() tea.Cmd { return d.listen() }
-
-func (d *Docker) listen() tea.Cmd {
-	return func() tea.Msg { return busMsg{"docker", <-d.sub} }
-}
+func (d *Docker) Init() tea.Cmd { return listenChan(d.sub, "docker") }
 
 func (d *Docker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case tea.WindowSizeMsg:
 		d.width, d.height = m.Width, m.Height
 	case busMsg:
-		if m.topic == "docker" {
+		if m.ch == d.sub {
 			if v, ok := m.data.(dockersvc.Snapshot); ok {
 				d.snap = &v
 			}
-			return d, d.listen()
+			return d, listenChan(d.sub, "docker")
+		}
+	case dockerActionMsg:
+		if m.err != nil {
+			d.statusMsg = styles.TextRed.Render("Action failed: " + m.err.Error())
+		} else {
+			d.statusMsg = styles.TextGreen.Render("Action completed: " + m.action)
+		}
+	case dockerLogsMsg:
+		d.logLoading = false
+		if m.err != nil {
+			d.logError = m.err.Error()
+			d.logLines = nil
+		} else {
+			d.logError = ""
+			d.logLines = m.lines
 		}
 	case tea.KeyMsg:
 		return d.handleKey(m)
@@ -71,8 +100,9 @@ func (d *Docker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if d.actionMode > 0 {
 		switch msg.String() {
 		case "y":
-			d.doAction()
+			mode := d.actionMode
 			d.actionMode = 0
+			return d, d.doActionCmd(mode)
 		case "n", "esc":
 			d.actionMode = 0
 		}
@@ -81,7 +111,7 @@ func (d *Docker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if d.detailMode || d.logMode {
 		switch msg.String() {
-		case "up", "k":
+		case "up":
 			d.detailScroll--
 		case "down", "j":
 			d.detailScroll++
@@ -94,6 +124,9 @@ func (d *Docker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "enter", "q":
 			d.detailMode, d.logMode = false, false
 			d.detailScroll = 0
+			d.logLines = nil
+			d.logError = ""
+			d.logLoading = false
 		}
 		return d, nil
 	}
@@ -109,14 +142,23 @@ func (d *Docker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		d.detailMode = true
+		d.detailScroll = 0
 	case "l":
+		if d.snap == nil || d.cursor >= len(d.snap.Containers) {
+			return d, nil
+		}
 		d.logMode = true
+		d.detailScroll = 0
+		d.logLines = nil
+		d.logError = ""
+		d.logLoading = true
+		return d, d.fetchLogsCmd()
 	case "r":
-		if privilege.CanKill() {
+		if privilege.HasDockerAccess() {
 			d.startAction(2)
 		}
 	case "s":
-		if privilege.CanKill() {
+		if privilege.HasDockerAccess() {
 			d.startAction(1)
 		}
 	}
@@ -128,23 +170,64 @@ func (d *Docker) startAction(mode int) {
 		return
 	}
 	d.actionMode = mode
-	d.actionTarget = d.snap.Containers[d.cursor].ID
+	d.actionTarget = d.snap.Containers[d.cursor].FullID
 }
 
-func (d *Docker) doAction() {
-	if d.snap == nil || d.cursor >= len(d.snap.Containers) {
-		return
+func (d *Docker) doActionCmd(mode int) tea.Cmd {
+	if d.dockerSvc == nil || d.snap == nil || d.cursor >= len(d.snap.Containers) {
+		return nil
 	}
 	c := d.snap.Containers[d.cursor]
 	action := "stop_container"
-	if d.actionMode == 2 {
+	if mode == 2 {
 		action = "restart_container"
 	}
-	if d.auditSvc != nil {
-		d.auditSvc.WriteEvent(audit.Event{
-			UID: os.Geteuid(), User: resolver.ByUID(os.Geteuid()),
-			Action: action, Target: c.Name, ID: c.FullID, Result: "requested",
-		})
+	id := c.FullID
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		var err error
+		switch mode {
+		case 1:
+			err = d.dockerSvc.StopContainer(ctx, id)
+		case 2:
+			err = d.dockerSvc.RestartContainer(ctx, id)
+		}
+
+		result := "success"
+		if err != nil {
+			result = "error: " + err.Error()
+		}
+		if d.auditSvc != nil {
+			d.auditSvc.WriteEvent(audit.Event{
+				UID: os.Geteuid(), User: resolver.ByUID(os.Geteuid()),
+				Action: action, Target: c.Name, ID: id, Result: result,
+			})
+		}
+		return dockerActionMsg{action: action, err: err}
+	}
+}
+
+func (d *Docker) fetchLogsCmd() tea.Cmd {
+	if d.dockerSvc == nil || d.snap == nil || d.cursor >= len(d.snap.Containers) {
+		return func() tea.Msg {
+			return dockerLogsMsg{err: fmt.Errorf("docker service unavailable")}
+		}
+	}
+	id := d.snap.Containers[d.cursor].FullID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		text, err := d.dockerSvc.ContainerLogs(ctx, id, 200)
+		if err != nil {
+			return dockerLogsMsg{err: err}
+		}
+		if text == "" {
+			return dockerLogsMsg{lines: []string{styles.TextMuted.Render("  (no log output)")}}
+		}
+		return dockerLogsMsg{lines: strings.Split(text, "\n")}
 	}
 }
 
@@ -155,6 +238,10 @@ func (d *Docker) View() string {
 				styles.TextRed.Render("  Docker is not available:\n\n") +
 				"  " + strings.ReplaceAll(d.snap.Error, "\n", "\n  "),
 		)
+	}
+
+	if d.logMode && d.snap != nil && d.cursor < len(d.snap.Containers) {
+		return d.renderLogs(d.snap.Containers[d.cursor])
 	}
 
 	if d.detailMode && d.snap != nil && d.cursor < len(d.snap.Containers) {
@@ -194,7 +281,6 @@ func (d *Docker) renderTable() string {
 		rows = append(rows, styles.TextMuted.Render("  No containers found"))
 	}
 
-	// Viewport windowing based on cursor.
 	viewHeight := d.height - 10
 	if viewHeight > 0 && len(rows) > viewHeight {
 		startIdx := d.cursor - viewHeight/2
@@ -216,9 +302,14 @@ func (d *Docker) renderTable() string {
 		actionDialog = "\n\n  " + styles.TextYellow.Render("Restart container? [y/N]")
 	}
 
+	statusLine := ""
+	if d.statusMsg != "" {
+		statusLine = "\n  " + d.statusMsg
+	}
+
 	return styles.PanelStyle.Render(
 		lipgloss.JoinVertical(lipgloss.Left,
-			title, header, strings.Join(rows, "\n"), actionDialog,
+			title, header, strings.Join(rows, "\n"), actionDialog, statusLine,
 		),
 	)
 }
@@ -227,7 +318,7 @@ func (d *Docker) renderDetail(c dockersvc.ContainerInfo) string {
 	var lines []string
 	lines = append(lines,
 		styles.PanelTitleStyle.Render(fmt.Sprintf("  Container: %s  (%s)", c.Name, c.DisplayStatus)),
-		fmt.Sprintf("  ID:      %s", c.FullID[:16]),
+		fmt.Sprintf("  ID:      %s", styles.Truncate(c.FullID, 17)),
 		fmt.Sprintf("  Image:   %s", c.Image),
 		fmt.Sprintf("  CPU:     %.2f%%   Memory: %s", c.CPUPercent, c.MemDisplay),
 		fmt.Sprintf("  Uptime:  %s", c.Uptime),
@@ -267,8 +358,28 @@ func (d *Docker) renderDetail(c dockersvc.ContainerInfo) string {
 	}
 
 	lines = append(lines, "", styles.TextMuted.Render("  Press ESC to go back"))
+	return d.renderScrollable(lines)
+}
 
-	// Implement manual scrolling for detail panel.
+func (d *Docker) renderLogs(c dockersvc.ContainerInfo) string {
+	lines := []string{
+		styles.PanelTitleStyle.Render(fmt.Sprintf("  Logs: %s", c.Name)),
+		"",
+	}
+	if d.logLoading {
+		lines = append(lines, styles.TextMuted.Render("  Loading logs…"))
+	} else if d.logError != "" {
+		lines = append(lines, styles.TextRed.Render("  Error: "+d.logError))
+	} else {
+		for _, line := range d.logLines {
+			lines = append(lines, "  "+styles.Truncate(line, d.width-4))
+		}
+	}
+	lines = append(lines, "", styles.TextMuted.Render("  Press ESC to go back"))
+	return d.renderScrollable(lines)
+}
+
+func (d *Docker) renderScrollable(lines []string) string {
 	viewHeight := d.height - 4
 	if viewHeight <= 0 {
 		return styles.PanelStyle.Render(strings.Join(lines, "\n"))
@@ -278,7 +389,6 @@ func (d *Docker) renderDetail(c dockersvc.ContainerInfo) string {
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
-
 	if d.detailScroll > maxScroll {
 		d.detailScroll = maxScroll
 	}
@@ -290,9 +400,8 @@ func (d *Docker) renderDetail(c dockersvc.ContainerInfo) string {
 	if endIdx > len(lines) {
 		endIdx = len(lines)
 	}
-
 	visibleLines := lines[d.detailScroll:endIdx]
-	
+
 	if maxScroll > 0 {
 		indicator := fmt.Sprintf("  Scroll: %d/%d (Use ↑/↓ or PgUp/PgDn)", d.detailScroll, maxScroll)
 		visibleLines = append(visibleLines, styles.TextMuted.Render(indicator))

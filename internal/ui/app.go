@@ -122,6 +122,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
+	case tea.MouseMsg:
+		var cmd tea.Cmd
+		m.tabs[m.activeTab], cmd = m.tabs[m.activeTab].Update(msg)
+		return m, cmd
 	}
 
 	// Forward all other messages (bus ticks, etc.) to all tabs.
@@ -199,15 +203,14 @@ func (m *Model) renderHelp() string {
 			"  ?            Toggle this help\n\n" +
 			styles.TextBold.Render("Process Tab (2)\n") +
 			"  ↑/↓          Navigate\n" +
-			"  s            Cycle sort column\n" +
+			"  s / F6       Sort processes\n" +
 			"  r            Reverse sort\n" +
 			"  /            Filter by name/user\n" +
 			"  ESC          Clear filter\n" +
 			"  Enter        Process detail\n" +
 			(func() string {
 				if privilege.CanKill() {
-					return "  k            Send SIGTERM (confirm)\n" +
-						"  K            Send SIGKILL (type PID)\n"
+					return "  k / F9       Send signal (kill, sleep, etc)\n"
 				}
 				return ""
 			})() + "\n" +

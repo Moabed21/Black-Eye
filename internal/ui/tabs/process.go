@@ -48,28 +48,59 @@ type Process struct {
 	filterErr   string
 
 	// Kill dialog state.
-	killMode   int // 0=none, 1=SIGTERM confirm, 2=SIGKILL type PID
-	killTarget *process.ProcessSnapshot
-	killInput  string
+	killMode     int // 0=none, 1=SIGTERM confirm (deprecated), 2=SIGKILL type PID, 3=Signal Menu
+	killTarget   *process.ProcessSnapshot
+	killInput    string
+	signalCursor int
 
 	// Detail panel.
-	detailMode bool
+	detailMode  bool
+	detailCache process.ProcessSnapshot
+
+	// Sort Menu state.
+	sortMenuMode   bool
+	sortMenuCursor int
+}
+
+var sortMenuItems = []struct {
+	name    string
+	col     sortColumn
+	reverse bool
+}{
+	{"CPU% (Descending)", sortCPU, false},
+	{"CPU% (Ascending)", sortCPU, true},
+	{"Memory (Descending)", sortMem, false},
+	{"Memory (Ascending)", sortMem, true},
+	{"PID (Ascending)", sortPID, false},
+	{"PID (Descending)", sortPID, true},
+	{"Name (Ascending)", sortName, false},
+	{"Name (Descending)", sortName, true},
+}
+
+var signalMenuItems = []struct {
+	name string
+	sig  syscall.Signal
+}{
+	{"15 SIGTERM (Graceful Kill)", syscall.SIGTERM},
+	{"9  SIGKILL (Force Kill)", syscall.SIGKILL},
+	{"19 SIGSTOP (Suspend)", syscall.SIGSTOP},
+	{"18 SIGCONT (Resume)", syscall.SIGCONT},
+	{"1  SIGHUP  (Reload)", syscall.SIGHUP},
 }
 
 func NewProcess(b *bus.Bus, cfg config.Config) *Process {
-	p := &Process{cfg: cfg, sub: b.Subscribe("process")}
+	p := &Process{
+		cfg:         cfg,
+		sub:         b.Subscribe("process"),
+		sortCol:     sortCPU,
+		sortReverse: false,
+	}
 	return p
 }
 
 func (p *Process) SetAudit(a *audit.Service) { p.auditSvc = a }
 
-func (p *Process) Init() tea.Cmd { return p.listen() }
-
-func (p *Process) listen() tea.Cmd {
-	return func() tea.Msg {
-		return busMsg{"process", <-p.sub}
-	}
-}
+func (p *Process) Init() tea.Cmd { return listenChan(p.sub, "process") }
 
 func (p *Process) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
@@ -77,14 +108,22 @@ func (p *Process) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p.width, p.height = m.Width, m.Height
 
 	case busMsg:
-		if m.topic == "process" {
+		if m.ch == p.sub {
 			if v, ok := m.data.(process.Snapshot); ok {
 				p.procs = v.Processes
 				if p.cursor >= len(p.procs) && len(p.procs) > 0 {
 					p.cursor = len(p.procs) - 1
 				}
+				if p.detailMode {
+					f := p.filtered()
+					if p.cursor < len(f) {
+						snap := f[p.cursor]
+						process.FetchDetails(&snap)
+						p.detailCache = snap
+					}
+				}
 			}
-			return p, p.listen()
+			return p, listenChan(p.sub, "process")
 		}
 
 	case tea.KeyMsg:
@@ -112,6 +151,30 @@ func (p *Process) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return p, nil
 	}
+	if p.killMode == 3 {
+		switch msg.String() {
+		case "up", "k":
+			if p.signalCursor > 0 {
+				p.signalCursor--
+			}
+		case "down", "j":
+			if p.signalCursor < len(signalMenuItems)-1 {
+				p.signalCursor++
+			}
+		case "enter":
+			sig := signalMenuItems[p.signalCursor].sig
+			if sig == syscall.SIGKILL {
+				p.killMode = 2 // Transition to type PID confirmation
+				p.killInput = ""
+			} else {
+				p.sendSignal(sig)
+				p.killMode = 0
+			}
+		case "esc", "q":
+			p.killMode = 0
+		}
+		return p, nil
+	}
 	if p.killMode == 1 {
 		switch msg.String() {
 		case "y":
@@ -119,6 +182,28 @@ func (p *Process) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			p.killMode = 0
 		default:
 			p.killMode, p.killInput = 0, ""
+		}
+		return p, nil
+	}
+
+	// Sort menu mode.
+	if p.sortMenuMode {
+		switch msg.String() {
+		case "up", "k":
+			if p.sortMenuCursor > 0 {
+				p.sortMenuCursor--
+			}
+		case "down", "j":
+			if p.sortMenuCursor < len(sortMenuItems)-1 {
+				p.sortMenuCursor++
+			}
+		case "enter":
+			item := sortMenuItems[p.sortMenuCursor]
+			p.sortCol = item.col
+			p.sortReverse = item.reverse
+			p.sortMenuMode = false
+		case "esc", "q", "f6":
+			p.sortMenuMode = false
 		}
 		return p, nil
 	}
@@ -160,6 +245,17 @@ func (p *Process) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		p.sortCol = (p.sortCol + 1) % 4
 	case "r":
 		p.sortReverse = !p.sortReverse
+	case "f6":
+		p.sortMenuMode = !p.sortMenuMode
+		if p.sortMenuMode {
+			// Find current sort config to focus
+			for i, item := range sortMenuItems {
+				if item.col == p.sortCol && item.reverse == p.sortReverse {
+					p.sortMenuCursor = i
+					break
+				}
+			}
+		}
 	case "/":
 		p.filterMode, p.filter = true, ""
 	case "esc":
@@ -170,13 +266,17 @@ func (p *Process) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		p.detailMode = !p.detailMode
-	case "k":
-		if privilege.CanKill() {
-			p.startKill(1)
+		if p.detailMode {
+			f := p.filtered()
+			if p.cursor < len(f) {
+				snap := f[p.cursor]
+				process.FetchDetails(&snap)
+				p.detailCache = snap
+			}
 		}
-	case "K":
+	case "k", "f9":
 		if privilege.CanKill() {
-			p.startKill(2)
+			p.startKill(3) // 3 = Signal menu
 		}
 	}
 	return p, nil
@@ -189,6 +289,7 @@ func (p *Process) startKill(mode int) {
 		p.killTarget = &snap
 		p.killMode = mode
 		p.killInput = ""
+		p.signalCursor = 0 // Reset signal menu cursor
 	}
 }
 
@@ -215,8 +316,15 @@ func (p *Process) sendSignal(sig syscall.Signal) {
 	}
 
 	action := "kill_process"
-	if sig == syscall.SIGKILL {
+	switch sig {
+	case syscall.SIGKILL:
 		action = "kill_process_sigkill"
+	case syscall.SIGSTOP:
+		action = "suspend_process"
+	case syscall.SIGCONT:
+		action = "resume_process"
+	case syscall.SIGHUP:
+		action = "reload_process"
 	}
 	if p.auditSvc != nil {
 		p.auditSvc.WriteEvent(audit.Event{
@@ -277,10 +385,7 @@ func (p *Process) sorted() []process.ProcessSnapshot {
 
 func (p *Process) View() string {
 	if p.detailMode {
-		f := p.filtered()
-		if p.cursor < len(f) {
-			return p.renderDetail(f[p.cursor])
-		}
+		return p.renderDetail(p.detailCache)
 	}
 	return p.renderTable()
 }
@@ -344,7 +449,19 @@ func (p *Process) renderTable() string {
 
 	// Kill dialog.
 	killDialog := ""
-	if p.killMode == 1 && p.killTarget != nil {
+	if p.killMode == 3 && p.killTarget != nil {
+		var menuRows []string
+		menuRows = append(menuRows, styles.TextYellow.Render(fmt.Sprintf("Send Signal to %s (PID %d):", p.killTarget.DisplayName, p.killTarget.PID)))
+		for i, item := range signalMenuItems {
+			if i == p.signalCursor {
+				menuRows = append(menuRows, styles.TableRowSelected.Render("  > "+item.name))
+			} else {
+				menuRows = append(menuRows, styles.TextNormal.Render("    "+item.name))
+			}
+		}
+		menuRows = append(menuRows, styles.TextMuted.Render("  (Use ↑/↓ to navigate, Enter to select, ESC to cancel)"))
+		killDialog = "\n\n  " + strings.Join(menuRows, "\n  ")
+	} else if p.killMode == 1 && p.killTarget != nil {
 		killDialog = "\n\n  " + styles.TextYellow.Render(
 			fmt.Sprintf("Send SIGTERM to %s (PID %d)? [y/N]", p.killTarget.DisplayName, p.killTarget.PID),
 		)
@@ -352,6 +469,21 @@ func (p *Process) renderTable() string {
 		killDialog = "\n\n  " + styles.TextRed.Render(
 			fmt.Sprintf("Type PID to confirm SIGKILL for %s: %s█", p.killTarget.DisplayName, p.killInput),
 		)
+	}
+
+	sortDialog := ""
+	if p.sortMenuMode {
+		var menuRows []string
+		menuRows = append(menuRows, styles.TextYellow.Render("Sort Processes By:"))
+		for i, item := range sortMenuItems {
+			if i == p.sortMenuCursor {
+				menuRows = append(menuRows, styles.TableRowSelected.Render("  > "+item.name))
+			} else {
+				menuRows = append(menuRows, styles.TextNormal.Render("    "+item.name))
+			}
+		}
+		menuRows = append(menuRows, styles.TextMuted.Render("  (Use ↑/↓ to navigate, Enter to select, ESC to cancel)"))
+		sortDialog = "\n\n  " + strings.Join(menuRows, "\n  ")
 	}
 
 	sortLabel := []string{"PID", "CPU", "Memory", "Name"}[p.sortCol]
@@ -367,7 +499,7 @@ func (p *Process) renderTable() string {
 		lipgloss.JoinVertical(lipgloss.Left,
 			title, header,
 			strings.Join(rows, "\n"),
-			filterBar, killDialog,
+			filterBar, killDialog, sortDialog,
 		),
 	)
 }

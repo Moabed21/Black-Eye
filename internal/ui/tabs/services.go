@@ -52,17 +52,11 @@ func NewServices(b *bus.Bus, cfg config.Config) *Services {
 	return s
 }
 
-func (s *Services) Init() tea.Cmd { return s.listen() }
-
-func (s *Services) listen() tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case v := <-s.subSystemd:
-			return busMsg{"systemd", v}
-		case v := <-s.subDmesg:
-			return busMsg{"dmesg", v}
-		}
-	}
+func (s *Services) Init() tea.Cmd {
+	return tea.Batch(
+		listenChan(s.subSystemd, "systemd"),
+		listenChan(s.subDmesg, "dmesg"),
+	)
 }
 
 func (s *Services) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -70,12 +64,14 @@ func (s *Services) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		s.width, s.height = m.Width, m.Height
 	case busMsg:
-		switch m.topic {
-		case "systemd":
+		var cmd tea.Cmd
+		switch m.ch {
+		case s.subSystemd:
 			if v, ok := m.data.(systemd.Snapshot); ok {
 				s.systemdSnap = &v
 			}
-		case "dmesg":
+			cmd = listenChan(s.subSystemd, "systemd")
+		case s.subDmesg:
 			if v, ok := m.data.(dmesg.Snapshot); ok {
 				s.dmesgBatch = append(s.dmesgBatch, v.Entries...)
 				// Keep last 500 entries.
@@ -83,8 +79,9 @@ func (s *Services) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.dmesgBatch = s.dmesgBatch[len(s.dmesgBatch)-500:]
 				}
 			}
+			cmd = listenChan(s.subDmesg, "dmesg")
 		}
-		return s, s.listen()
+		return s, cmd
 	case tea.KeyMsg:
 		return s.handleKey(m)
 	}

@@ -63,21 +63,13 @@ func NewNetwork(b *bus.Bus, cfg config.Config) *Network {
 	return n
 }
 
-func (n *Network) Init() tea.Cmd { return n.listen() }
-
-func (n *Network) listen() tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case v := <-n.subNet:
-			return busMsg{"network", v}
-		case v := <-n.subPorts:
-			return busMsg{"ports", v}
-		case v := <-n.subRouting:
-			return busMsg{"routing", v}
-		case v := <-n.subNetstats:
-			return busMsg{"netstats", v}
-		}
-	}
+func (n *Network) Init() tea.Cmd {
+	return tea.Batch(
+		listenChan(n.subNet, "network"),
+		listenChan(n.subPorts, "ports"),
+		listenChan(n.subRouting, "routing"),
+		listenChan(n.subNetstats, "netstats"),
+	)
 }
 
 func (n *Network) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -85,25 +77,30 @@ func (n *Network) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		n.width, n.height = m.Width, m.Height
 	case busMsg:
-		switch m.topic {
-		case "network":
+		var cmd tea.Cmd
+		switch m.ch {
+		case n.subNet:
 			if v, ok := m.data.(network.Snapshot); ok {
 				n.netSnap = &v
 			}
-		case "ports":
+			cmd = listenChan(n.subNet, "network")
+		case n.subPorts:
 			if v, ok := m.data.(ports.PortsSnapshot); ok {
 				n.portsSnap = &v
 			}
-		case "routing":
+			cmd = listenChan(n.subPorts, "ports")
+		case n.subRouting:
 			if v, ok := m.data.(routing.Snapshot); ok {
 				n.routingSnap = &v
 			}
-		case "netstats":
+			cmd = listenChan(n.subRouting, "routing")
+		case n.subNetstats:
 			if v, ok := m.data.(netstats.Snapshot); ok {
 				n.netstatsSnap = &v
 			}
+			cmd = listenChan(n.subNetstats, "netstats")
 		}
-		return n, n.listen()
+		return n, cmd
 	case tea.KeyMsg:
 		switch m.String() {
 		case "tab":
@@ -114,7 +111,23 @@ func (n *Network) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				n.cursor--
 			}
 		case "down", "j":
-			n.cursor++
+			max := 0
+			if n.panel == subPanelPorts && n.portsSnap != nil {
+				for _, l := range n.portsSnap.Listeners {
+					if n.filter == "" || strings.Contains(strings.ToLower(l.DisplayService), strings.ToLower(n.filter)) {
+						max++
+					}
+				}
+			} else if n.panel == subPanelConnections && n.portsSnap != nil {
+				for _, c := range n.portsSnap.Connections {
+					if n.filter == "" || strings.Contains(strings.ToLower(c.RemoteDisplay), strings.ToLower(n.filter)) || strings.Contains(strings.ToLower(c.LocalDisplay), strings.ToLower(n.filter)) || strings.Contains(strings.ToLower(c.DisplayProcess), strings.ToLower(n.filter)) {
+						max++
+					}
+				}
+			}
+			if max > 0 && n.cursor < max-1 {
+				n.cursor++
+			}
 		case "/":
 			n.filterMode = !n.filterMode
 			if !n.filterMode {
@@ -126,9 +139,11 @@ func (n *Network) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if n.filterMode && len(m.String()) == 1 {
 				if filterRe.MatchString(n.filter + m.String()) {
 					n.filter += m.String()
+					n.cursor = 0 // Reset cursor on filter change
 				}
 			} else if n.filterMode && m.String() == "backspace" && len(n.filter) > 0 {
 				n.filter = n.filter[:len(n.filter)-1]
+				n.cursor = 0 // Reset cursor on filter change
 			}
 		}
 	}
@@ -210,12 +225,13 @@ func (n *Network) viewListeners() string {
 		fmt.Sprintf("%-32s  %-5s  %-22s  %-20s  %-12s",
 			"Service", "Proto", "Listening On", "Process", "Owner"),
 	))
-	for i, l := range n.portsSnap.Listeners {
+	filteredIdx := 0
+	for _, l := range n.portsSnap.Listeners {
 		if n.filter != "" && !strings.Contains(strings.ToLower(l.DisplayService), strings.ToLower(n.filter)) {
 			continue
 		}
 		style := styles.TableRow
-		if i == n.cursor {
+		if filteredIdx == n.cursor {
 			style = styles.TableRowSelected
 		}
 		if l.Flagged {
@@ -233,6 +249,10 @@ func (n *Network) viewListeners() string {
 			styles.Truncate(l.DisplayProcess, 20),
 			l.Owner,
 		)))
+		filteredIdx++
+	}
+	if len(rows) == 1 {
+		rows = append(rows, styles.TextMuted.Render("  No active listeners found"))
 	}
 
 	// Viewport windowing based on cursor.
@@ -266,9 +286,13 @@ func (n *Network) viewConnections() string {
 		fmt.Sprintf("%-36s  %-26s  %-28s  %-20s",
 			"Local", "Remote", "State", "Process"),
 	))
-	for i, c := range n.portsSnap.Connections {
+	filteredIdx := 0
+	for _, c := range n.portsSnap.Connections {
+		if n.filter != "" && !strings.Contains(strings.ToLower(c.RemoteDisplay), strings.ToLower(n.filter)) && !strings.Contains(strings.ToLower(c.LocalDisplay), strings.ToLower(n.filter)) && !strings.Contains(strings.ToLower(c.DisplayProcess), strings.ToLower(n.filter)) {
+			continue
+		}
 		style := styles.TableRow
-		if i == n.cursor {
+		if filteredIdx == n.cursor {
 			style = styles.TableRowSelected
 		}
 		rows = append(rows, style.Render(fmt.Sprintf("%-36s  %-26s  %-28s  %-20s",
@@ -277,6 +301,7 @@ func (n *Network) viewConnections() string {
 			styles.Truncate(c.DisplayState, 28),
 			styles.Truncate(c.DisplayProcess, 20),
 		)))
+		filteredIdx++
 	}
 
 	// Viewport windowing based on cursor.

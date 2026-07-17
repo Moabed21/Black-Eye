@@ -38,10 +38,12 @@ type RefreshConfig struct {
 type AlertsConfig struct {
 	CPUWarning    float64 `toml:"cpu_warning"`
 	CPUCritical   float64 `toml:"cpu_critical"`
-	MemoryWarning float64 `toml:"memory_warning"`
-	DiskWarning   float64 `toml:"disk_warning"`
-	TempWarning   float64 `toml:"temp_warning"`
-	TempCritical  float64 `toml:"temp_critical"`
+	MemoryWarning  float64 `toml:"memory_warning"`
+	MemoryCritical float64 `toml:"memory_critical"`
+	DiskWarning    float64 `toml:"disk_warning"`
+	DiskCritical   float64 `toml:"disk_critical"`
+	TempWarning    float64 `toml:"temp_warning"`
+	TempCritical   float64 `toml:"temp_critical"`
 }
 
 // PortsConfig controls port highlighting behavior.
@@ -83,10 +85,12 @@ func Defaults() Config {
 		Alerts: AlertsConfig{
 			CPUWarning:    70.0,
 			CPUCritical:   85.0,
-			MemoryWarning: 70.0,
-			DiskWarning:   80.0,
-			TempWarning:   70.0,
-			TempCritical:  85.0,
+			MemoryWarning:  70.0,
+			MemoryCritical: 90.0,
+			DiskWarning:    80.0,
+			DiskCritical:   95.0,
+			TempWarning:    70.0,
+			TempCritical:   85.0,
 		},
 		Ports: PortsConfig{
 			TrustedPorts: []uint16{22, 80, 443, 5432},
@@ -152,6 +156,26 @@ func validate(cfg Config) error {
 	}
 	if a.CPUWarning >= a.CPUCritical {
 		return fmt.Errorf("alerts.cpu_warning (%.1f) must be < cpu_critical (%.1f)", a.CPUWarning, a.CPUCritical)
+	}
+
+	if a.MemoryWarning < 0 || a.MemoryWarning > 100 {
+		return fmt.Errorf("alerts.memory_warning must be 0–100, got %.1f", a.MemoryWarning)
+	}
+	if a.MemoryCritical < 0 || a.MemoryCritical > 100 {
+		return fmt.Errorf("alerts.memory_critical must be 0–100, got %.1f", a.MemoryCritical)
+	}
+	if a.MemoryWarning >= a.MemoryCritical {
+		return fmt.Errorf("alerts.memory_warning (%.1f) must be < memory_critical (%.1f)", a.MemoryWarning, a.MemoryCritical)
+	}
+
+	if a.DiskWarning < 0 || a.DiskWarning > 100 {
+		return fmt.Errorf("alerts.disk_warning must be 0–100, got %.1f", a.DiskWarning)
+	}
+	if a.DiskCritical < 0 || a.DiskCritical > 100 {
+		return fmt.Errorf("alerts.disk_critical must be 0–100, got %.1f", a.DiskCritical)
+	}
+	if a.DiskWarning >= a.DiskCritical {
+		return fmt.Errorf("alerts.disk_warning (%.1f) must be < disk_critical (%.1f)", a.DiskWarning, a.DiskCritical)
 	}
 
 	return nil

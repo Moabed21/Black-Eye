@@ -41,13 +41,18 @@ var facilityNames = []string{
 
 // Service streams /dev/kmsg.
 type Service struct {
-	out    chan interface{}
-	health atomic.Value
-	cancel context.CancelFunc
+	streaming bool
+	bootTime  uint64
+	out       chan interface{}
+	health    atomic.Value
+	cancel    context.CancelFunc
 }
 
-func New(_ config.Config) *Service {
-	s := &Service{out: make(chan interface{}, 16)}
+func New(cfg config.Config) *Service {
+	s := &Service{
+		streaming: cfg.Refresh.DmesgStreaming,
+		out:       make(chan interface{}, 16),
+	}
 	s.health.Store(services.HealthStatus{State: services.HealthOK})
 	return s
 }
@@ -57,10 +62,24 @@ func (s *Service) Topic()  string                { return "dmesg" }
 func (s *Service) Output() <-chan interface{}     { return s.out }
 func (s *Service) Health() services.HealthStatus { return s.health.Load().(services.HealthStatus) }
 func (s *Service) Stop()   { if s.cancel != nil { s.cancel() } }
-func (s *Service) Reload(_ config.Config)        {}
+
+func (s *Service) Reload(cfg config.Config) {
+	s.streaming = cfg.Refresh.DmesgStreaming
+}
 
 func (s *Service) Start(ctx context.Context) error {
 	ctx, s.cancel = context.WithCancel(ctx)
+
+	if !s.streaming {
+		s.health.Store(services.HealthStatus{
+			State:  services.HealthOK,
+			Reason: "dmesg streaming disabled in config",
+		})
+		<-ctx.Done()
+		return nil
+	}
+
+	s.bootTime = readBootTime()
 
 	f, err := os.Open("/dev/kmsg")
 	if err != nil {
@@ -98,7 +117,7 @@ func (s *Service) Start(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if e, err := parseLine(line); err == nil {
+			if e, err := s.parseLine(line); err == nil {
 				batch = append(batch, e)
 			}
 		case <-flushTicker.C:
@@ -114,11 +133,7 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 }
 
-// parseLine decodes one /dev/kmsg line.
-// Format: "priority,sequence,timestamp_us,-;message"
-// priority = facility*8 + level
-func parseLine(line string) (Entry, error) {
-	// Split at the first ';' to separate metadata from message.
+func (s *Service) parseLine(line string) (Entry, error) {
 	semiIdx := strings.Index(line, ";")
 	if semiIdx < 0 {
 		return Entry{}, fmt.Errorf("no semicolon")
@@ -147,11 +162,9 @@ func parseLine(line string) (Entry, error) {
 		facilityName = facilityNames[facility]
 	}
 
-	// Timestamp is in microseconds since boot.
 	tsMicros, _ := strconv.ParseInt(parts[2], 10, 64)
-	ts := time.Now().Add(-time.Since(time.Now()) + time.Duration(tsMicros)*time.Microsecond)
+	ts := bootTimestamp(s.bootTime, tsMicros)
 
-	// Clean up multi-line continuations.
 	msg = strings.ReplaceAll(msg, "\n ", " ")
 
 	return Entry{
@@ -160,4 +173,32 @@ func parseLine(line string) (Entry, error) {
 		Facility:  facilityName,
 		Message:   strings.TrimSpace(msg),
 	}, nil
+}
+
+func bootTimestamp(bootTime uint64, tsMicros int64) time.Time {
+	if bootTime == 0 {
+		return time.Now()
+	}
+	return time.Unix(int64(bootTime), 0).Add(time.Duration(tsMicros) * time.Microsecond)
+}
+
+func readBootTime() uint64 {
+	f, err := os.Open("/proc/stat")
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "btime") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				t, _ := strconv.ParseUint(fields[1], 10, 64)
+				return t
+			}
+		}
+	}
+	return 0
 }

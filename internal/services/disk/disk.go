@@ -57,7 +57,7 @@ type Service struct {
 
 func New(cfg config.Config) *Service {
 	s := &Service{
-		interval: time.Duration(cfg.Refresh.PortsInterval) * time.Second,
+		interval: time.Duration(cfg.Refresh.DashboardInterval) * time.Second,
 		out:      make(chan interface{}, 4),
 	}
 	s.health.Store(services.HealthStatus{State: services.HealthOK})
@@ -70,7 +70,7 @@ func (s *Service) Output() <-chan interface{}     { return s.out }
 func (s *Service) Health() services.HealthStatus { return s.health.Load().(services.HealthStatus) }
 func (s *Service) Stop()   { if s.cancel != nil { s.cancel() } }
 func (s *Service) Reload(cfg config.Config) {
-	s.interval = time.Duration(cfg.Refresh.PortsInterval) * time.Second
+	s.interval = time.Duration(cfg.Refresh.DashboardInterval) * time.Second
 }
 
 func (s *Service) Start(ctx context.Context) error {

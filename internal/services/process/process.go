@@ -139,6 +139,30 @@ func (s *Service) collect() (Snapshot, error) {
 	return Snapshot{Processes: procs, Timestamp: now}, nil
 }
 
+// FetchDetails reads the OpenFDs and Cgroup path for a specific process.
+// It is intended to be called lazily for single processes.
+func FetchDetails(p *ProcessSnapshot) {
+	base := fmt.Sprintf("/proc/%d", p.PID)
+	
+	// Count Open FDs
+	if fds, err := os.ReadDir(filepath.Join(base, "fd")); err == nil {
+		p.OpenFDs = len(fds)
+	}
+
+	// Read Cgroup
+	if cgData, err := os.ReadFile(filepath.Join(base, "cgroup")); err == nil {
+		lines := strings.Split(string(cgData), "\n")
+		if len(lines) > 0 {
+			parts := strings.SplitN(lines[0], ":", 3)
+			if len(parts) == 3 {
+				p.CgroupPath = parts[2]
+			} else {
+				p.CgroupPath = lines[0]
+			}
+		}
+	}
+}
+
 func (s *Service) readProcess(pid int, now time.Time, prev, newMap map[int]cpuAccum) (ProcessSnapshot, error) {
 	base := fmt.Sprintf("/proc/%d", pid)
 

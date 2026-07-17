@@ -19,6 +19,8 @@ A real-time TUI (Terminal User Interface) system monitor built in Go. BlackEye r
   BlackEye  │  ● normal                           q quit  │  ? help  │  1–5 tabs
 ```
 
+**Theme:** Features a sleek **Navy Blue & Gold** premium color palette, with dynamic highlighting and flagged row warnings (⚠).
+
 ## Quick Start
 
 ```bash
@@ -81,26 +83,34 @@ main.go
 ### Tab 1 — Dashboard
 System overview: hostname, uptime, CPU bars with per-core %, memory/swap usage, disk + I/O, network interfaces with traffic rates, temperature readings.
 
+**Drag-and-Drop Flexible Layout**: The Dashboard supports a fully dynamic layout manager! If your terminal supports mouse events, you can **click and drag** any panel to rearrange the grid.
+- Drop on the **left/right** of a panel to place it **beside** it (horizontally).
+- Drop on the **top/bottom** of a panel to place it **above/below** it.
+- Panels automatically and flexibly align their width depending on how many components share a row!
+
 ### Tab 2 — Processes
-Interactive process table with **sort** (PID/CPU/Memory/Name), **filter** by name/user, **detail panel** (full command, FDs, cgroup), and **kill** support (SIGTERM with confirm, SIGKILL with PID re-type). Kill is only available when running as root or with `CAP_KILL`.
+Interactive process table with **sort** (PID/CPU/Memory/Name), **filter** by name/user, **detail panel** (full command, FDs, cgroup), and **kill** support (SIGTERM with confirm, SIGKILL with PID re-type). Features a **smart scrolling viewport** that tracks your cursor seamlessly. Kill is only available when running as root or with `CAP_KILL`.
 
 ### Tab 3 — Network
-Five sub-panels: **Interfaces** (traffic rates), **Listeners** (open ports with service names like "22/tcp → ssh (Secure Shell)"), **Connections** (active TCP with state), **Routing** (route table + ARP cache), **Statistics** (retransmits, errors, drops).
+Five sub-panels: **Interfaces** (traffic rates), **Listeners** (open ports with service names like "22/tcp → ssh (Secure Shell)"), **Connections** (active TCP with state), **Routing** (route table + ARP cache), **Statistics** (retransmits, errors, drops). Listeners and Connections lists feature smooth **viewport scrolling**.
 
 ### Tab 4 — Docker
-Container table with CPU%, memory, status. **Detail panel** shows environment variables (sensitive values like `PASSWORD` are `[REDACTED]`), volume mounts, network info, port mappings. **Stop/Restart** with confirmation dialog. Gracefully handles Docker being unavailable.
+Container table with CPU%, memory, status. **Detail panel** shows environment variables (sensitive values like `PASSWORD` are `[REDACTED]`), volume mounts, network info, port mappings. **Stop/Restart** with confirmation dialog. The detail panel includes **manual scrolling** for containers with extensive environments. Gracefully handles Docker being unavailable using the v28+ SDK.
 
 ### Tab 5 — Services
-**Systemd units** with filter (all/failed/running), **Kernel log** streaming with color-coded severity levels (emerg=red, warn=yellow, info=green).
+**Systemd units** with filter (all/failed/running) and a **smart scrolling viewport**, **Kernel log** streaming with color-coded severity levels (emerg=red, warn=yellow, info=green) that automatically windows the latest logs to your terminal size.
 
 ## Keyboard Shortcuts
 
 | Key         | Context     | Action                        |
 |-------------|-------------|-------------------------------|
+| `Mouse Drag`| Dashboard   | Rearrange panels dynamically  |
 | `q`/`Ctrl+C` | Global    | Quit                          |
 | `1`–`5`    | Global      | Switch tab                    |
 | `?`        | Global      | Toggle help overlay           |
-| `↑`/`↓`   | Tables      | Navigate rows                 |
+| `↑`/`↓`   | Tables      | Navigate rows / scroll        |
+| `PgUp`/`PgDn`| Scrollable| Fast scroll up/down           |
+| `Home`     | Scrollable  | Reset scroll to top           |
 | `j`        | Tables      | Navigate down                 |
 | `/`        | Tables      | Start filter                  |
 | `ESC`      | Any         | Cancel filter / close detail  |
@@ -214,4 +224,4 @@ make clean  # remove artifacts
 
 ## License
 
-Academic project — see subject PDF for requirements.
+This project is licensed under the **MIT License**. See the `LICENSE` file for details.

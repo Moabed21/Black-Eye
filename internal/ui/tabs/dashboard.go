@@ -51,6 +51,17 @@ type Dashboard struct {
 
 	// Scroll state.
 	scrollOffset int
+
+	// Drag & Drop Layout state.
+	layout     [][]string
+	bounds     map[string]PanelBounds
+	dragTarget string
+}
+
+type PanelBounds struct {
+	ID   string
+	X, Y int
+	W, H int
 }
 
 func NewDashboard(b *bus.Bus, cfg config.Config) *Dashboard {
@@ -63,34 +74,31 @@ func NewDashboard(b *bus.Bus, cfg config.Config) *Dashboard {
 	d.subNet = b.Subscribe("network")
 	d.subThermal = b.Subscribe("thermal")
 	d.subSys = b.Subscribe("sysinfo")
+	
+	// Default layout: stacked vertically.
+	d.layout = [][]string{
+		{"sysinfo"},
+		{"cpu"},
+		{"memory"},
+		{"disk"},
+		{"network"},
+	}
+	d.bounds = make(map[string]PanelBounds)
+
 	return d
 }
 
 func (d *Dashboard) Init() tea.Cmd {
-	return d.listenAll()
-}
-
-func (d *Dashboard) listenAll() tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case v := <-d.subCPU:
-			return busMsg{"cpu", v}
-		case v := <-d.subMem:
-			return busMsg{"memory", v}
-		case v := <-d.subSwap:
-			return busMsg{"swap", v}
-		case v := <-d.subDisk:
-			return busMsg{"disk", v}
-		case v := <-d.subIO:
-			return busMsg{"io", v}
-		case v := <-d.subNet:
-			return busMsg{"network", v}
-		case v := <-d.subThermal:
-			return busMsg{"thermal", v}
-		case v := <-d.subSys:
-			return busMsg{"sysinfo", v}
-		}
-	}
+	return tea.Batch(
+		listenChan(d.subCPU, "cpu"),
+		listenChan(d.subMem, "memory"),
+		listenChan(d.subSwap, "swap"),
+		listenChan(d.subDisk, "disk"),
+		listenChan(d.subIO, "io"),
+		listenChan(d.subNet, "network"),
+		listenChan(d.subThermal, "thermal"),
+		listenChan(d.subSys, "sysinfo"),
+	)
 }
 
 func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -99,41 +107,50 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.width = m.Width
 		d.height = m.Height
 	case busMsg:
-		switch m.topic {
-		case "cpu":
+		var cmd tea.Cmd
+		switch m.ch {
+		case d.subCPU:
 			if v, ok := m.data.(cpu.Snapshot); ok {
 				d.cpuSnap = &v
 			}
-		case "memory":
+			cmd = listenChan(d.subCPU, "cpu")
+		case d.subMem:
 			if v, ok := m.data.(memory.Snapshot); ok {
 				d.memSnap = &v
 			}
-		case "swap":
+			cmd = listenChan(d.subMem, "memory")
+		case d.subSwap:
 			if v, ok := m.data.(swap.Snapshot); ok {
 				d.swapSnap = &v
 			}
-		case "disk":
+			cmd = listenChan(d.subSwap, "swap")
+		case d.subDisk:
 			if v, ok := m.data.(disk.Snapshot); ok {
 				d.diskSnap = &v
 			}
-		case "io":
+			cmd = listenChan(d.subDisk, "disk")
+		case d.subIO:
 			if v, ok := m.data.(iosvc.Snapshot); ok {
 				d.ioSnap = &v
 			}
-		case "network":
+			cmd = listenChan(d.subIO, "io")
+		case d.subNet:
 			if v, ok := m.data.(network.Snapshot); ok {
 				d.netSnap = &v
 			}
-		case "thermal":
+			cmd = listenChan(d.subNet, "network")
+		case d.subThermal:
 			if v, ok := m.data.(thermal.Snapshot); ok {
 				d.thermalSnap = &v
 			}
-		case "sysinfo":
+			cmd = listenChan(d.subThermal, "thermal")
+		case d.subSys:
 			if v, ok := m.data.(sysinfo.Snapshot); ok {
 				d.sysSnap = &v
 			}
+			cmd = listenChan(d.subSys, "sysinfo")
 		}
-		return d, d.listenAll()
+		return d, cmd
 	case tea.KeyMsg:
 		switch m.String() {
 		case "up", "k":
@@ -147,8 +164,117 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "home":
 			d.scrollOffset = 0
 		}
+	case tea.MouseMsg:
+		if m.Action == tea.MouseActionPress && m.Button == tea.MouseButtonLeft {
+			id := d.findPanelAt(m.X, m.Y)
+			if id != "" {
+				d.dragTarget = id
+			}
+		} else if m.Action == tea.MouseActionRelease && m.Button == tea.MouseButtonLeft {
+			if d.dragTarget != "" {
+				dropTarget := d.findPanelAt(m.X, m.Y)
+				if dropTarget != "" && dropTarget != d.dragTarget {
+					d.handleDrop(d.dragTarget, dropTarget, m.X, m.Y)
+				}
+				d.dragTarget = ""
+			}
+		}
 	}
 	return d, nil
+}
+
+func (d *Dashboard) findPanelAt(x, y int) string {
+	for id, b := range d.bounds {
+		if x >= b.X && x < b.X+b.W && y >= b.Y && y < b.Y+b.H {
+			return id
+		}
+	}
+	return ""
+}
+
+func (d *Dashboard) handleDrop(src, dst string, x, y int) {
+	// Find bounding box of dst
+	b, ok := d.bounds[dst]
+	if !ok {
+		return
+	}
+	
+	// Determine drop zone (Left/Right 25%, Top/Bottom 25%, Center 50%)
+	relX := x - b.X
+	relY := y - b.Y
+	
+	action := "swap"
+	if relX < b.W/4 {
+		action = "left"
+	} else if relX > b.W*3/4 {
+		action = "right"
+	} else if relY < b.H/4 {
+		action = "top"
+	} else if relY > b.H*3/4 {
+		action = "bottom"
+	}
+
+	// Remove src from layout
+	var srcStr string
+	var newLayout [][]string
+	for _, row := range d.layout {
+		var newRow []string
+		for _, col := range row {
+			if col == src {
+				srcStr = col
+			} else {
+				newRow = append(newRow, col)
+			}
+		}
+		if len(newRow) > 0 {
+			newLayout = append(newLayout, newRow)
+		}
+	}
+	d.layout = newLayout
+
+	if srcStr == "" {
+		return // shouldn't happen
+	}
+
+	if action == "swap" {
+		// Just swap in place (src becomes dst, dst becomes src). 
+		// Actually, we already removed src. Let's just replace dst with src, and put dst where src was...
+		// But since we removed src, that's complex. Let's just insert src before dst, and shift dst.
+		// A true swap is easier if we don't remove src first.
+		// For simplicity, "swap" will just place src exactly where dst is (insert before).
+		action = "left"
+	}
+
+	// Insert src into new layout relative to dst
+	var finalLayout [][]string
+	for _, row := range d.layout {
+		var newRow []string
+		rowMatched := false
+		for _, col := range row {
+			if col == dst {
+				rowMatched = true
+				if action == "left" {
+					newRow = append(newRow, srcStr, col)
+				} else if action == "right" {
+					newRow = append(newRow, col, srcStr)
+				} else {
+					newRow = append(newRow, col) // top or bottom handled at row level
+				}
+			} else {
+				newRow = append(newRow, col)
+			}
+		}
+		if rowMatched && action == "top" {
+			finalLayout = append(finalLayout, []string{srcStr})
+			finalLayout = append(finalLayout, newRow)
+		} else if rowMatched && action == "bottom" {
+			finalLayout = append(finalLayout, newRow)
+			finalLayout = append(finalLayout, []string{srcStr})
+		} else {
+			finalLayout = append(finalLayout, newRow)
+		}
+	}
+	d.layout = finalLayout
 }
 
 func (d *Dashboard) View() string {
@@ -156,20 +282,64 @@ func (d *Dashboard) View() string {
 		return styles.TextMuted.Render("  Waiting for data…")
 	}
 
-	var sections []string
+	// Tab bar is 2 lines, status bar is 1 line.
+	// We track Y relative to the terminal so mouse clicks match.
+	currentY := 2 - d.scrollOffset
+	d.bounds = make(map[string]PanelBounds)
 
-	// System Info panel.
-	sections = append(sections, d.renderSysInfo())
-	// CPU panel.
-	sections = append(sections, d.renderCPU())
-	// Memory + Swap panel.
-	sections = append(sections, d.renderMemory())
-	// Disk panel.
-	sections = append(sections, d.renderDisk())
-	// Network panel.
-	sections = append(sections, d.renderNetwork())
+	var rowsStr []string
+	for _, row := range d.layout {
+		var rowRenders []string
+		var maxH int
+		currentX := 0
+		targetWidth := (d.width - 2) / len(row)
+		if targetWidth < 20 {
+			targetWidth = 20
+		}
+		
 
-	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
+		// Pass 1: find max height
+		for _, id := range row {
+			var content string
+			switch id {
+			case "sysinfo": content = d.renderSysInfo(targetWidth, 0)
+			case "cpu": content = d.renderCPU(targetWidth, 0)
+			case "memory": content = d.renderMemory(targetWidth, 0)
+			case "disk": content = d.renderDisk(targetWidth, 0)
+			case "network": content = d.renderNetwork(targetWidth, 0)
+			}
+			h := lipgloss.Height(content)
+			if h > maxH {
+				maxH = h
+			}
+		}
+
+		// Pass 2: render with max height
+		for _, id := range row {
+			var content string
+			switch id {
+			case "sysinfo": content = d.renderSysInfo(targetWidth, maxH)
+			case "cpu": content = d.renderCPU(targetWidth, maxH)
+			case "memory": content = d.renderMemory(targetWidth, maxH)
+			case "disk": content = d.renderDisk(targetWidth, maxH)
+			case "network": content = d.renderNetwork(targetWidth, maxH)
+			}
+			if content == "" {
+				continue
+			}
+
+			w := lipgloss.Width(content)
+			
+			// Save bounding box for mouse events
+			d.bounds[id] = PanelBounds{ID: id, X: currentX, Y: currentY, W: w, H: maxH}
+			rowRenders = append(rowRenders, content)
+			currentX += w
+		}
+		rowsStr = append(rowsStr, lipgloss.JoinHorizontal(lipgloss.Top, rowRenders...))
+		currentY += maxH
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, rowsStr...)
 
 	// Implement manual scrolling by splitting into lines and slicing.
 	lines := strings.Split(content, "\n")
@@ -209,10 +379,19 @@ func (d *Dashboard) View() string {
 	return strings.Join(visibleLines, "\n")
 }
 
-func (d *Dashboard) renderSysInfo() string {
+func (d *Dashboard) renderSysInfo(targetWidth, targetHeight int) string {
 	title := styles.PanelTitleStyle.Render("  System Info")
+	
+	style := styles.PanelStyle.Copy()
+	if targetWidth > 0 {
+		style = style.Width(targetWidth)
+	}
+	if targetHeight > 0 {
+		style = style.Height(targetHeight - 2) // -2 for borders
+	}
+
 	if d.sysSnap == nil {
-		return styles.PanelStyle.Render(title + "\n  Loading…")
+		return style.Render(title + "\n  Loading…")
 	}
 	s := d.sysSnap
 	line1 := fmt.Sprintf("  Hostname: %s  │  Uptime: %s  │  Kernel: %s",
@@ -221,13 +400,22 @@ func (d *Dashboard) renderSysInfo() string {
 		s.CPUModel, s.CPUCores, s.CPUThreads)
 	line3 := fmt.Sprintf("  Load avg:  1m: %.2f  │  5m: %.2f  │  15m: %.2f",
 		s.LoadAvg1, s.LoadAvg5, s.LoadAvg15)
-	return styles.PanelStyle.Render(title + "\n" + line1 + "\n" + line2 + "\n" + line3)
+	return style.Render(title + "\n" + line1 + "\n" + line2 + "\n" + line3)
 }
 
-func (d *Dashboard) renderCPU() string {
+func (d *Dashboard) renderCPU(targetWidth, targetHeight int) string {
 	title := styles.PanelTitleStyle.Render("  CPU")
+	
+	style := styles.PanelStyle.Copy()
+	if targetWidth > 0 {
+		style = style.Width(targetWidth)
+	}
+	if targetHeight > 0 {
+		style = style.Height(targetHeight - 2)
+	}
+
 	if d.cpuSnap == nil {
-		return styles.PanelStyle.Render(title + "\n  Loading…")
+		return style.Render(title + "\n  Loading…")
 	}
 	s := d.cpuSnap
 	warn := d.cfg.Alerts.CPUWarning
@@ -255,15 +443,23 @@ func (d *Dashboard) renderCPU() string {
 	}
 
 	body := title + "\n" + totalLine + "\n" + strings.Join(coreLines, "\n") + tempLine
-	return styles.PanelStyle.Render(body)
+	return style.Render(body)
 }
 
-func (d *Dashboard) renderMemory() string {
+func (d *Dashboard) renderMemory(targetWidth, targetHeight int) string {
 	title := styles.PanelTitleStyle.Render("  Memory")
+	
+	style := styles.PanelStyle.Copy()
+	if targetWidth > 0 {
+		style = style.Width(targetWidth)
+	}
+	if targetHeight > 0 {
+		style = style.Height(targetHeight - 2)
+	}
 	var lines []string
 
 	warn := d.cfg.Alerts.MemoryWarning
-	crit := 90.0
+	crit := d.cfg.Alerts.MemoryCritical
 
 	if d.memSnap != nil {
 		m := d.memSnap
@@ -298,16 +494,25 @@ func (d *Dashboard) renderMemory() string {
 		)
 	}
 
-	return styles.PanelStyle.Render(title + "\n" + strings.Join(lines, "\n"))
+	return style.Render(title + "\n" + strings.Join(lines, "\n"))
 }
 
-func (d *Dashboard) renderDisk() string {
+func (d *Dashboard) renderDisk(targetWidth, targetHeight int) string {
 	title := styles.PanelTitleStyle.Render("  Disk")
+	
+	style := styles.PanelStyle.Copy()
+	if targetWidth > 0 {
+		style = style.Width(targetWidth)
+	}
+	if targetHeight > 0 {
+		style = style.Height(targetHeight - 2)
+	}
+
 	if d.diskSnap == nil {
-		return styles.PanelStyle.Render(title + "\n  Loading…")
+		return style.Render(title + "\n  Loading…")
 	}
 	warn := d.cfg.Alerts.DiskWarning
-	crit := 95.0
+	crit := d.cfg.Alerts.DiskCritical
 
 	var lines []string
 	for _, dk := range d.diskSnap.Disks {
@@ -321,8 +526,8 @@ func (d *Dashboard) renderDisk() string {
 				}
 			}
 		}
-		inodeLine := fmt.Sprintf("  Inodes: %s used  %.0f%%",
-			resolver.FormatBytes(dk.InodesTotal-dk.InodesFree),
+		inodeLine := fmt.Sprintf("  Inodes: %d used  %.0f%%",
+			dk.InodesTotal-dk.InodesFree,
 			dk.InodesPercent)
 
 		lines = append(lines, fmt.Sprintf("  %s\n    %s / %s  %s  %s%s%s",
@@ -339,13 +544,22 @@ func (d *Dashboard) renderDisk() string {
 	if len(lines) == 0 {
 		lines = append(lines, "  No mounted filesystems found")
 	}
-	return styles.PanelStyle.Render(title + "\n" + strings.Join(lines, "\n"))
+	return style.Render(title + "\n" + strings.Join(lines, "\n"))
 }
 
-func (d *Dashboard) renderNetwork() string {
+func (d *Dashboard) renderNetwork(targetWidth, targetHeight int) string {
 	title := styles.PanelTitleStyle.Render("  Network")
+	
+	style := styles.PanelStyle.Copy()
+	if targetWidth > 0 {
+		style = style.Width(targetWidth)
+	}
+	if targetHeight > 0 {
+		style = style.Height(targetHeight - 2)
+	}
+
 	if d.netSnap == nil {
-		return styles.PanelStyle.Render(title + "\n  Loading…")
+		return style.Render(title + "\n  Loading…")
 	}
 	var lines []string
 	for _, iface := range d.netSnap.Ifaces {
@@ -363,5 +577,5 @@ func (d *Dashboard) renderNetwork() string {
 	if len(lines) == 0 {
 		lines = append(lines, "  No active interfaces")
 	}
-	return styles.PanelStyle.Render(title + "\n" + lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return style.Render(title + "\n" + lipgloss.JoinVertical(lipgloss.Left, lines...))
 }

@@ -123,14 +123,11 @@ func appendHeaderField(b []byte, code byte, sigChar byte, value string) []byte {
 	for len(b)%8 != 0 {
 		b = append(b, 0)
 	}
-	b = append(b, code)    // field code
-	b = append(b, 0, 0, 0) // padding to align variant
-	// Variant: signature length (1 byte) + signature + NUL + value.
+	b = append(b, code)          // field code
+	// Variant: signature length (1 byte) + signature + NUL.
 	b = append(b, 1, sigChar, 0) // sig len=1, sig char, NUL
-	// Pad to 4-byte boundary for the string length.
-	for len(b)%4 != 0 {
-		b = append(b, 0)
-	}
+	// Value is string/object path, which requires 4-byte alignment.
+	// Since b was 8-byte aligned and we appended exactly 4 bytes, we are perfectly 4-byte aligned.
 	b = appendUint32LE(b, uint32(len(value)))
 	b = append(b, value...)
 	b = append(b, 0) // NUL terminator
@@ -175,13 +172,12 @@ func extractUnitsFromBytes(data []byte) []unitInfo {
 	for i < len(data)-4 {
 		// Try reading a uint32 length prefix.
 		length := int(binary.LittleEndian.Uint32(data[i:]))
-		i += 4
-		if length <= 0 || length > 512 || i+length >= len(data) {
-			i -= 3 // backtrack and try next byte offset
+		// String must have a null terminator and fit in bounds
+		if length <= 0 || length > 512 || i+4+length >= len(data) || data[i+4+length] != 0 {
+			i++
 			continue
 		}
-		s := string(data[i : i+length])
-		i += length + 1 // skip NUL terminator
+		s := string(data[i+4 : i+4+length])
 
 		// Filter to printable ASCII strings of reasonable length.
 		printable := true
@@ -192,9 +188,11 @@ func extractUnitsFromBytes(data []byte) []unitInfo {
 			}
 		}
 		if !printable || len(s) < 3 {
+			i++
 			continue
 		}
 		names = append(names, s)
+		i += 4 + length + 1 // skip the successfully read string
 	}
 
 	// Group consecutive strings into unit records.
