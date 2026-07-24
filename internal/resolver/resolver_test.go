@@ -123,7 +123,8 @@ func TestMount(t *testing.T) {
 		{"/", "/ (Root Filesystem)"},
 		{"/home", "/home (User Home)"},
 		{"/boot", "/boot (Boot Partition)"},
-		{"/mnt/backups", "/mnt/backups"}, // descriptive — shown as-is
+		{"/mnt/backups", "/mnt/backups (Mount Point — backups)"},
+		{"/custom/backups", "/custom/backups"},
 	}
 	for _, tt := range tests {
 		got := resolver.Mount(tt.input)
@@ -150,6 +151,48 @@ func TestFormatBytes(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("FormatBytes(%d) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestFormatHelpers(t *testing.T) {
+	if got := resolver.FormatRate(2048); got != "2.0 KB/s" {
+		t.Errorf("FormatRate unexpected: %s", got)
+	}
+	if got := resolver.FormatPercent(85.4); got != "85.4%" {
+		t.Errorf("FormatPercent unexpected: %s", got)
+	}
+	if got := resolver.FormatTemp(65.0); got != "65°C" {
+		t.Errorf("FormatTemp unexpected: %s", got)
+	}
+}
+
+func TestDockerStatusIcon(t *testing.T) {
+	if icon := resolver.DockerStatusIcon("running"); icon != "●" {
+		t.Errorf("expected ● for running, got %s", icon)
+	}
+	if icon := resolver.DockerStatusIcon("unknown"); icon != "?" {
+		t.Errorf("expected ? for unknown, got %s", icon)
+	}
+}
+
+func TestPortWithNumber(t *testing.T) {
+	resolver.InitPorts()
+	res := resolver.PortWithNumber(22)
+	if res == "" {
+		t.Error("expected non-empty PortWithNumber")
+	}
+}
+
+func TestUserResolver(t *testing.T) {
+	_ = resolver.InitUsers()
+	rootName := resolver.ByUID(0)
+	if rootName != "root" {
+		t.Logf("ByUID(0) = %s (expected root if /etc/passwd has 0)", rootName)
+	}
+
+	strRes := resolver.ByUIDStr("0")
+	if strRes != rootName {
+		t.Errorf("ByUIDStr(\"0\") expected %s, got %s", rootName, strRes)
 	}
 }
 

@@ -1,3 +1,5 @@
+export PATH := $(HOME)/go/bin:$(PATH)
+
 BINARY  := blackeye
 GOFLAGS := -trimpath
 GO      := $(HOME)/go/bin/go

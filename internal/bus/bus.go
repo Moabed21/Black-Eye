@@ -39,7 +39,14 @@ func (b *Bus) Unsubscribe(topic string, sub <-chan interface{}) {
 	subs := b.subscribers[topic]
 	for i, ch := range subs {
 		if ch == sub {
-			b.subscribers[topic] = append(subs[:i], subs[i+1:]...)
+			newSubs := make([]chan interface{}, 0, len(subs)-1)
+			newSubs = append(newSubs, subs[:i]...)
+			newSubs = append(newSubs, subs[i+1:]...)
+			if len(newSubs) == 0 {
+				delete(b.subscribers, topic)
+			} else {
+				b.subscribers[topic] = newSubs
+			}
 			close(ch)
 			return
 		}
@@ -51,9 +58,8 @@ func (b *Bus) Unsubscribe(topic string, sub <-chan interface{}) {
 // for that subscriber rather than blocking the publishing service.
 func (b *Bus) Publish(topic string, data interface{}) {
 	b.mu.RLock()
-	subs := b.subscribers[topic]
-	b.mu.RUnlock()
-	for _, ch := range subs {
+	defer b.mu.RUnlock()
+	for _, ch := range b.subscribers[topic] {
 		select {
 		case ch <- data:
 		default:

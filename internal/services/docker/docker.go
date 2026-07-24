@@ -191,6 +191,15 @@ func (s *Service) Start(ctx context.Context) error {
 
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
+
+	// Initial snapshot in background
+	go func() {
+		select {
+		case s.out <- s.collect(ctx):
+		default:
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -235,7 +244,10 @@ func (s *Service) collect(ctx context.Context) Snapshot {
 
 func (s *Service) buildInfo(ctx context.Context, c container.Summary) ContainerInfo {
 	cli := s.client()
-	name := strings.TrimPrefix(c.Names[0], "/")
+	name := c.ID[:12]
+	if len(c.Names) > 0 {
+		name = strings.TrimPrefix(c.Names[0], "/")
+	}
 	status := resolver.DockerStatus(string(c.State))
 
 	// CPU and memory from stats (non-streaming single read).

@@ -173,19 +173,22 @@ func readStat() ([]cpuTimes, error) {
 		if len(fields) < 8 {
 			continue
 		}
-		var t cpuTimes
-		vals := []*uint64{&t.user, &t.nice, &t.system, &t.idle, &t.iowait, &t.irq, &t.softirq, &t.steal}
-		ok := true
-		for i, v := range vals {
-			n, err := strconv.ParseUint(fields[i+1], 10, 64)
-			if err != nil {
-				ok = false
-				break
-			}
-			*v = n
+		u0, err0 := strconv.ParseUint(fields[1], 10, 64)
+		u1, err1 := strconv.ParseUint(fields[2], 10, 64)
+		u2, err2 := strconv.ParseUint(fields[3], 10, 64)
+		u3, err3 := strconv.ParseUint(fields[4], 10, 64)
+		u4, err4 := strconv.ParseUint(fields[5], 10, 64)
+		u5, err5 := strconv.ParseUint(fields[6], 10, 64)
+		u6, err6 := strconv.ParseUint(fields[7], 10, 64)
+		var u7 uint64
+		if len(fields) > 8 {
+			u7, _ = strconv.ParseUint(fields[8], 10, 64)
 		}
-		if ok {
-			times = append(times, t)
+		if err0 == nil && err1 == nil && err2 == nil && err3 == nil && err4 == nil && err5 == nil && err6 == nil {
+			times = append(times, cpuTimes{
+				user: u0, nice: u1, system: u2, idle: u3,
+				iowait: u4, irq: u5, softirq: u6, steal: u7,
+			})
 		}
 	}
 	return times, scanner.Err()

@@ -78,6 +78,15 @@ func (s *Service) Start(ctx context.Context) error {
 
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
+
+	// Initial snapshot in background
+	go func() {
+		if snap, err := s.collect(); err == nil {
+			s.health.Store(services.HealthStatus{State: services.HealthOK})
+			select { case s.out <- snap: default: }
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():

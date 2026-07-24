@@ -7,12 +7,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"blackeye/internal/resolver"
 	"blackeye/internal/config"
+	"blackeye/internal/resolver"
 	"blackeye/internal/services"
 	"golang.org/x/sys/unix"
 )
@@ -122,13 +123,15 @@ func collect() (Snapshot, error) {
 	}
 
 	// Sort filtered mounts so '/' comes first, then by shortest mount path
-	for i := 0; i < len(filtered); i++ {
-		for j := i + 1; j < len(filtered); j++ {
-			if filtered[j].mountPoint == "/" || (filtered[i].mountPoint != "/" && len(filtered[j].mountPoint) < len(filtered[i].mountPoint)) {
-				filtered[i], filtered[j] = filtered[j], filtered[i]
-			}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].mountPoint == "/" {
+			return true
 		}
-	}
+		if filtered[j].mountPoint == "/" {
+			return false
+		}
+		return len(filtered[i].mountPoint) < len(filtered[j].mountPoint)
+	})
 
 	const gib = 1024.0 * 1024.0 * 1024.0
 	var disks []DiskSnapshot

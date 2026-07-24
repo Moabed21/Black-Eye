@@ -341,13 +341,22 @@ func scopeLabel(addr string) (display, raw string) {
 	return addr, addr
 }
 
+var rfc1918Nets = func() []*net.IPNet {
+	cidrs := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	var nets []*net.IPNet
+	for _, c := range cidrs {
+		_, n, _ := net.ParseCIDR(c)
+		nets = append(nets, n)
+	}
+	return nets
+}()
+
 func isRFC1918(addr string) bool {
 	ip := net.ParseIP(addr)
 	if ip == nil {
 		return false
 	}
-	for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
-		_, n, _ := net.ParseCIDR(cidr)
+	for _, n := range rfc1918Nets {
 		if n.Contains(ip) {
 			return true
 		}

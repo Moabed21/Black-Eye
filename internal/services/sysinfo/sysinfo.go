@@ -162,6 +162,7 @@ func parseCPUInfo() (model string, cores, threads int) {
 	defer f.Close()
 
 	physMap := make(map[string]bool)
+	var currentPhysID string
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -174,10 +175,16 @@ func parseCPUInfo() (model string, cores, threads int) {
 		if strings.HasPrefix(line, "processor") {
 			threads++
 		}
+		if strings.HasPrefix(line, "physical id") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				currentPhysID = strings.TrimSpace(parts[1])
+			}
+		}
 		if strings.HasPrefix(line, "core id") {
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
-				physMap[strings.TrimSpace(parts[1])] = true
+				physMap[currentPhysID+":"+strings.TrimSpace(parts[1])] = true
 			}
 		}
 	}

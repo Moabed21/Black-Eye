@@ -12,22 +12,24 @@ import (
 )
 
 var (
-	once       sync.Once
-	hasKill    bool
-	isRoot     bool
-	hasDocker  bool
-	hasNetAdmin bool
-	hasPtrace   bool
+	once          sync.Once
+	hasKill       bool
+	isRoot        bool
+	hasDocker     bool
+	hasNetAdmin   bool
+	hasPtrace     bool
+	canReadShadow bool
 )
 
 // Init detects effective privileges. Call once at startup before rendering.
 func Init() {
 	once.Do(func() {
 		isRoot = os.Geteuid() == 0
-		hasKill = isRoot || checkCap(5)    // CAP_KILL
+		hasKill = isRoot || checkCap(5)      // CAP_KILL
 		hasNetAdmin = isRoot || checkCap(12) // CAP_NET_ADMIN
 		hasPtrace = isRoot || checkCap(19)   // CAP_SYS_PTRACE
 		hasDocker = checkDockerSocket()
+		canReadShadow = checkShadowAccess()
 	})
 }
 
@@ -72,13 +74,20 @@ func CanManageUsers() bool {
 }
 
 // CanReadShadow reports whether the process can read /etc/shadow.
-// True if root, or if the process's effective group is 'shadow'.
 func CanReadShadow() bool {
+	return canReadShadow
+}
+
+func checkShadowAccess() bool {
 	if isRoot {
 		return true
 	}
-	_, err := os.Open("/etc/shadow")
-	return err == nil
+	f, err := os.Open("/etc/shadow")
+	if err == nil {
+		f.Close()
+		return true
+	}
+	return false
 }
 
 // CanReadProcIO reports whether the process can read /proc/[pid]/io

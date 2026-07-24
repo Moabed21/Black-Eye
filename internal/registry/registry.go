@@ -49,6 +49,9 @@ func (r *Registry) StartAll(ctx context.Context) {
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
+			defer func() {
+				_ = recover() // isolate bridge panics
+			}()
 			out := svc.Output()
 			for {
 				select {
@@ -67,16 +70,24 @@ func (r *Registry) StartAll(ctx context.Context) {
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
+			defer func() {
+				_ = recover() // isolate service panics
+			}()
 			_ = svc.Start(ctx) // errors are reflected in Health()
 		}()
 	}
 }
 
-// StopAll cancels the context and waits for all services to exit.
+// StopAll cancels the context, calls Stop() on all services, and waits for them to exit.
 func (r *Registry) StopAll() {
 	if r.cancel != nil {
 		r.cancel()
 	}
+	r.mu.RLock()
+	for _, svc := range r.svcs {
+		svc.Stop()
+	}
+	r.mu.RUnlock()
 	r.wg.Wait()
 }
 

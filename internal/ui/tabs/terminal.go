@@ -34,10 +34,11 @@ type Terminal struct {
 	width, height int
 
 	// PTY state.
-	ptmx    *os.File
-	cmd     *exec.Cmd
-	focused bool // true = keystrokes go to shell; false = navigation mode
-	started bool
+	ptmx      *os.File
+	cmd       *exec.Cmd
+	focused   bool // true = keystrokes go to shell; false = navigation mode
+	started   bool
+	col       int  // current active column on last line
 
 	// Display buffer.
 	mu       sync.Mutex
@@ -230,7 +231,50 @@ func (t *Terminal) readPTY() tea.Cmd {
 	}
 }
 
-// processOutput handles raw PTY output, interpreting basic ANSI sequences.
+// parseEscape returns the full ANSI/OSC escape sequence starting at index i.
+func parseEscape(s string, i int) string {
+	if i >= len(s) || s[i] != '\x1b' {
+		return ""
+	}
+	end := i + 1
+	if end < len(s) {
+		switch s[end] {
+		case '[':
+			end++
+			for end < len(s) {
+				c := s[end]
+				end++
+				if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '~' {
+					break
+				}
+			}
+		case ']':
+			end++
+			for end < len(s) {
+				if s[end] == '\x07' {
+					end++
+					break
+				}
+				if s[end] == '\x1b' && end+1 < len(s) && s[end+1] == '\\' {
+					end += 2
+					break
+				}
+				end++
+			}
+		case '(', ')', '#', '%':
+			if end+1 < len(s) {
+				end += 2
+			} else {
+				end = len(s)
+			}
+		default:
+			end++
+		}
+	}
+	return s[i:end]
+}
+
+// processOutput handles raw PTY output, interpreting ANSI sequences and cursor positioning.
 func (t *Terminal) processOutput(data string) {
 	if data == "" {
 		return
@@ -239,59 +283,69 @@ func (t *Terminal) processOutput(data string) {
 	defer t.mu.Unlock()
 
 	for i := 0; i < len(data); {
+		if data[i] == '\x1b' {
+			seq := parseEscape(data, i)
+			if len(seq) > 0 {
+				if strings.HasPrefix(seq, "\x1b]") {
+					// OSC sequence (window title, CWD, etc.) — swallow completely
+				} else {
+					switch seq {
+					case "\x1b[2J", "\x1b[3J", "\x1b[H\x1b[2J":
+						t.lines = []string{""}
+						t.col = 0
+					case "\x1b[K", "\x1b[0K":
+						if len(t.lines) > 0 {
+							t.lines[len(t.lines)-1] = truncateAtCol(t.lines[len(t.lines)-1], t.col)
+						}
+					case "\x1b[D", "\x1b[1D":
+						if t.col > 0 {
+							t.col--
+						}
+					case "\x1b[C", "\x1b[1C":
+						t.col++
+					default:
+						if len(t.lines) > 0 {
+							t.lines[len(t.lines)-1] += seq
+						}
+					}
+				}
+				i += len(seq)
+				continue
+			}
+		}
+
 		r, size := utf8.DecodeRuneInString(data[i:])
 
 		switch {
 		case r == '\n':
 			t.lines = append(t.lines, "")
+			t.col = 0
+
 		case r == '\r':
-			// Carriage return — cursor to start of current line.
-			// We handle this by noting the CR; the next text overwrites the line.
-			if len(t.lines) > 0 {
-				t.lines[len(t.lines)-1] = ""
-			}
-		case r == '\x1b':
-			// ANSI escape — pass through as-is for lipgloss to handle.
-			// Find the end of the sequence.
-			end := i + size
-			if end < len(data) && data[end] == '[' {
-				end++ // skip '['
-				for end < len(data) {
-					c := data[end]
-					end++
-					if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '~' {
-						break
-					}
-				}
-			}
-			seq := data[i:end]
-			if len(t.lines) > 0 {
-				t.lines[len(t.lines)-1] += seq
-			}
-			i = end
-			continue
+			t.col = 0
+
 		case r == '\b':
-			// Backspace.
-			if len(t.lines) > 0 {
-				line := t.lines[len(t.lines)-1]
-				if len(line) > 0 {
-					_, sz := utf8.DecodeLastRuneInString(line)
-					t.lines[len(t.lines)-1] = line[:len(line)-sz]
-				}
+			if t.col > 0 {
+				t.col--
 			}
+
 		case r == '\t':
-			// Tab — expand to spaces (next multiple of 8).
-			if len(t.lines) > 0 {
-				cur := len(t.lines[len(t.lines)-1])
-				spaces := 8 - (cur % 8)
-				t.lines[len(t.lines)-1] += strings.Repeat(" ", spaces)
+			spaces := 8 - (t.col % 8)
+			for s := 0; s < spaces; s++ {
+				if len(t.lines) > 0 {
+					t.lines[len(t.lines)-1] = overwriteAtCol(t.lines[len(t.lines)-1], t.col, ' ')
+				}
+				t.col++
 			}
+
 		case r == '\a':
 			// Bell — ignore.
+
 		default:
 			if len(t.lines) > 0 {
-				t.lines[len(t.lines)-1] += string(r)
+				t.lines[len(t.lines)-1] = overwriteAtCol(t.lines[len(t.lines)-1], t.col, r)
 			}
+			t.col++
 		}
 		i += size
 	}
@@ -300,6 +354,90 @@ func (t *Terminal) processOutput(data string) {
 	if len(t.lines) > t.maxLines {
 		t.lines = t.lines[len(t.lines)-t.maxLines:]
 	}
+}
+
+// visibleLen returns the number of visible (non-ANSI escape) runes in s.
+func visibleLen(s string) int {
+	count := 0
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			seq := parseEscape(s, i)
+			if len(seq) > 0 {
+				i += len(seq)
+				continue
+			}
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		count++
+		i += size
+	}
+	return count
+}
+
+// overwriteAtCol overwrites the visible rune at column col with r,
+// expanding with spaces if col > visibleLen(s), preserving ANSI escape codes.
+func overwriteAtCol(s string, col int, r rune) string {
+	vLen := visibleLen(s)
+	if col >= vLen {
+		padding := col - vLen
+		return s + strings.Repeat(" ", padding) + string(r)
+	}
+
+	var sb strings.Builder
+	sb.Grow(len(s) + 4)
+	visIdx := 0
+
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			seq := parseEscape(s, i)
+			if len(seq) > 0 {
+				sb.WriteString(seq)
+				i += len(seq)
+				continue
+			}
+		}
+
+		runeVal, size := utf8.DecodeRuneInString(s[i:])
+		if visIdx == col {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteRune(runeVal)
+		}
+		visIdx++
+		i += size
+	}
+	return sb.String()
+}
+
+// truncateAtCol keeps visible runes up to col (and trailing ANSI resets), dropping text beyond col.
+func truncateAtCol(s string, col int) string {
+	vLen := visibleLen(s)
+	if col >= vLen {
+		return s
+	}
+
+	var sb strings.Builder
+	sb.Grow(len(s))
+	visIdx := 0
+
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			seq := parseEscape(s, i)
+			if len(seq) > 0 {
+				sb.WriteString(seq)
+				i += len(seq)
+				continue
+			}
+		}
+
+		runeVal, size := utf8.DecodeRuneInString(s[i:])
+		if visIdx < col {
+			sb.WriteRune(runeVal)
+			visIdx++
+		}
+		i += size
+	}
+	return sb.String()
 }
 
 // resizePTY sends TIOCSWINSZ to the PTY.

@@ -170,7 +170,7 @@ func isPartitionOrVirtual(name string) bool {
 		}
 	}
 	// Skip sdaN, nvme0n1pN (partitions end in a digit after a letter).
-	if len(name) > 0 {
+	if len(name) >= 2 {
 		last := name[len(name)-1]
 		if last >= '0' && last <= '9' {
 			prev := name[len(name)-2]

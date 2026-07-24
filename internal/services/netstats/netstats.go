@@ -105,8 +105,8 @@ func parseSnmp(path string) (map[string]uint64, error) {
 		// Parse header and value lines in pairs.
 		headers := strings.Fields(headerLine)
 		values := strings.Fields(line)
-		if len(headers) != len(values) {
-			headerLine = ""
+		if len(headers) == 0 || len(values) == 0 || headers[0] != values[0] || len(headers) != len(values) {
+			headerLine = line
 			continue
 		}
 		protocol := strings.TrimSuffix(headers[0], ":")

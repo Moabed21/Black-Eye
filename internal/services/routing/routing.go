@@ -4,7 +4,6 @@ package routing
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -195,9 +194,7 @@ func hexToIPv4(h string) string {
 	if err != nil || len(b) != 4 {
 		return h
 	}
-	// Little-endian: reverse bytes.
-	n := binary.LittleEndian.Uint32(b)
-	return net.IP([]byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}).String()
+	return net.IPv4(b[3], b[2], b[1], b[0]).String()
 }
 
 func maskToPrefix(mask string) int {
