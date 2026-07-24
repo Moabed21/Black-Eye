@@ -4,6 +4,8 @@ package ui
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -11,6 +13,7 @@ import (
 	"blackeye/internal/bus"
 	"blackeye/internal/config"
 	"blackeye/internal/privilege"
+	"blackeye/internal/services/alerts"
 	"blackeye/internal/ui/styles"
 	"blackeye/internal/ui/tabs"
 )
@@ -27,6 +30,11 @@ const (
 	TabNetwork
 	TabDocker
 	TabServices
+	TabTerminal
+	TabFirewall
+	TabPackages
+	TabUsers
+	TabAdvanced
 	TabCount
 )
 
@@ -36,6 +44,11 @@ var tabNames = [TabCount]string{
 	"[3] Network",
 	"[4] Docker",
 	"[5] Services",
+	"[6] Terminal",
+	"[7] Firewall",
+	"[8] Packages",
+	"[9] Users",
+	"[0] Advanced",
 }
 
 // Model is the root bubbletea model.
@@ -46,16 +59,32 @@ type Model struct {
 	tabs      [TabCount]tea.Model
 	helpOpen  bool
 	cfg       config.Config
+
+	// Alert notification state.
+	alertSub    <-chan interface{}
+	alertSnap   *alerts.Snapshot
+	alertToast  string
+	alertExpiry time.Time
 }
 
 // New creates the root model and initialises all tab models.
 func New(b *bus.Bus, cfg config.Config) *Model {
-	m := &Model{cfg: cfg}
-	m.tabs[TabDashboard] = tabs.NewDashboard(b, cfg)
-	m.tabs[TabProcess] = tabs.NewProcess(b, cfg)
-	m.tabs[TabNetwork] = tabs.NewNetwork(b, cfg)
-	m.tabs[TabDocker] = tabs.NewDocker(b, cfg)
-	m.tabs[TabServices] = tabs.NewServices(b, cfg)
+	m := &Model{
+		cfg:      cfg,
+		alertSub: b.Subscribe("alerts"),
+		tabs: [TabCount]tea.Model{
+			tabs.NewDashboard(b, cfg),
+			tabs.NewProcess(b, cfg),
+			tabs.NewNetwork(b, cfg),
+			tabs.NewDocker(b, cfg),
+			tabs.NewServices(b, cfg),
+			tabs.NewTerminal(),
+			tabs.NewFirewall(b, cfg),
+			tabs.NewPackages(b, cfg),
+			tabs.NewUsers(b, cfg),
+			tabs.NewAdvanced(b, cfg),
+		},
+	}
 	return m
 }
 
@@ -73,7 +102,23 @@ func (m *Model) Init() tea.Cmd {
 	for i := range m.tabs {
 		cmds = append(cmds, m.tabs[i].Init())
 	}
+	cmds = append(cmds, listenAlerts(m.alertSub))
 	return tea.Batch(cmds...)
+}
+
+// alertMsg delivers an alert snapshot from the bus.
+type alertMsg struct {
+	snap alerts.Snapshot
+}
+
+func listenAlerts(ch <-chan interface{}) tea.Cmd {
+	return func() tea.Msg {
+		v := <-ch
+		if snap, ok := v.(alerts.Snapshot); ok {
+			return alertMsg{snap: snap}
+		}
+		return nil
+	}
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -90,17 +135,71 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case alertMsg:
+		m.alertSnap = &msg.snap
+		if len(msg.snap.Active) > 0 {
+			// Show the highest-priority alert as a toast.
+			alert := msg.snap.Active[0]
+			for _, a := range msg.snap.Active {
+				if a.Level == alerts.AlertCritical {
+					alert = a
+					break
+				}
+			}
+			m.alertToast = alert.Message
+			m.alertExpiry = time.Now().Add(10 * time.Second)
+		} else {
+			m.alertToast = ""
+		}
+		return m, listenAlerts(m.alertSub)
+
+	case tabs.TerminalFocused:
+		// Terminal reports focus change — no action needed, the terminal
+		// tab's IsFocused() method is used during key routing.
+		return m, nil
+
 	case tea.KeyMsg:
+		// When the terminal tab is focused, forward ALL keys to it
+		// (including q, numbers, ctrl+c) — except that ctrl+c when NOT
+		// focused in the terminal still quits.
+		if m.activeTab == TabTerminal {
+			if termTab, ok := m.tabs[TabTerminal].(*tabs.Terminal); ok && termTab.IsFocused() {
+				var cmd tea.Cmd
+				m.tabs[TabTerminal], cmd = m.tabs[TabTerminal].Update(msg)
+				return m, cmd
+			}
+		}
+
 		if m.helpOpen {
 			if msg.String() == "?" || msg.String() == "q" || msg.String() == "esc" {
 				m.helpOpen = false
 				return m, nil
 			}
+			switch msg.String() {
+			case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+				idx := int(msg.String()[0] - '1')
+				if idx < TabCount {
+					m.activeTab = idx
+					m.helpOpen = false
+				}
+			case "0":
+				m.activeTab = TabAdvanced
+				m.helpOpen = false
+			}
 			return m, nil
 		}
 
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
+			return m, tea.Quit
+		case "q":
+			// Don't quit if terminal tab is active (even if not focused,
+			// user might be in navigation mode and 'q' should not quit).
+			if m.activeTab == TabTerminal {
+				var cmd tea.Cmd
+				m.tabs[m.activeTab], cmd = m.tabs[m.activeTab].Update(msg)
+				return m, cmd
+			}
 			return m, tea.Quit
 		case "?":
 			m.helpOpen = true
@@ -115,6 +214,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = TabDocker
 		case "5":
 			m.activeTab = TabServices
+		case "6":
+			m.activeTab = TabTerminal
+			// Auto-start shell when switching to terminal tab.
+			if termTab, ok := m.tabs[TabTerminal].(*tabs.Terminal); ok {
+				if !termTab.IsStarted() {
+					var cmd tea.Cmd
+					m.tabs[TabTerminal], cmd = m.tabs[TabTerminal].Update(msg)
+					return m, cmd
+				}
+			}
+		case "7":
+			m.activeTab = TabFirewall
+		case "8":
+			m.activeTab = TabPackages
+		case "9":
+			m.activeTab = TabUsers
+		case "0":
+			m.activeTab = TabAdvanced
 		default:
 			// Delegate to active tab.
 			var cmd tea.Cmd
@@ -179,9 +296,31 @@ func (m *Model) renderStatusBar() string {
 	}
 	brandName := lipgloss.NewStyle().Bold(true).Foreground(styles.ColorGold).Render("BlackEye")
 	left := fmt.Sprintf("  %s  │  %s", brandName, privStr)
-	right := styles.TextMuted.Render("q quit  │  ? help  │  1–5 tabs  ")
 
-	width := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	// Alert toast notification.
+	toast := ""
+	if m.alertToast != "" && time.Now().Before(m.alertExpiry) {
+		var toastParts []string
+		if m.alertSnap != nil {
+			for _, a := range m.alertSnap.Active {
+				icon := "⚠"
+				toastStyle := styles.TextYellow
+				if a.Level == alerts.AlertCritical {
+					icon = "🔴"
+					toastStyle = styles.TextRed
+				}
+				toastParts = append(toastParts, toastStyle.Render(icon+" "+a.Message))
+			}
+		}
+		if len(toastParts) > 2 {
+			toastParts = toastParts[:2] // Max 2 alerts in status bar.
+		}
+		toast = "  │  " + strings.Join(toastParts, "  ")
+	}
+
+	right := styles.TextMuted.Render("q quit  │  ? help  │  1–9,0 tabs  ")
+
+	width := m.width - lipgloss.Width(left) - lipgloss.Width(toast) - lipgloss.Width(right)
 	if width < 0 {
 		width = 0
 	}
@@ -190,49 +329,94 @@ func (m *Model) renderStatusBar() string {
 	bar := lipgloss.NewStyle().
 		Foreground(styles.ColorText).
 		Background(styles.ColorNavy).
-		Render(left + spacer + right)
+		Render(left + toast + spacer + right)
 	return bar
 }
 
 func (m *Model) renderHelp() string {
 	return styles.PanelStyle.Render(
-		styles.PanelTitleStyle.Render("? Help — Keyboard Shortcuts") + "\n\n" +
-			styles.TextBold.Render("Global\n") +
-			"  q / Ctrl+C   Quit\n" +
-			"  1–5          Switch tab\n" +
-			"  ?            Toggle this help\n\n" +
+		styles.PanelTitleStyle.Render("? Help — Keyboard Shortcuts & Usage") + "\n\n" +
+			styles.TextBold.Render("Global Shortcuts\n") +
+			"  q / Ctrl+C   Quit application\n" +
+			"  1–6          Switch between tabs\n" +
+			"  ?            Toggle this help screen\n\n" +
+			styles.TextBold.Render("Dashboard Tab (1)\n") +
+			"  Mouse Drag   Drag & drop panel headers to rearrange layout\n" +
+			"  ↑/↓ / PgUp   Scroll dashboard view up and down\n" +
+			"  Trend (2m)   Rolling 2-minute metric graphs (CPU, RAM, Net)\n\n" +
 			styles.TextBold.Render("Process Tab (2)\n") +
-			"  ↑/↓          Navigate\n" +
-			"  s / F6       Sort processes\n" +
-			"  r            Reverse sort\n" +
-			"  /            Filter by name/user\n" +
-			"  ESC          Clear filter\n" +
-			"  Enter        Process detail\n" +
+			"  ↑/↓          Navigate process list\n" +
+			"  t            Toggle Tree view (├── └──) vs Flat list\n" +
+			"  s / F6       Change sort metric (CPU, Memory, I/O, PID)\n" +
+			"  r            Reverse current sort order\n" +
+			"  /            Filter processes by name or user\n" +
+			"  ESC          Clear search filter\n" +
+			"  Enter        View detailed process metadata & I/O rates\n" +
 			(func() string {
 				if privilege.CanKill() {
-					return "  k / F9       Send signal (kill, sleep, etc)\n"
+					return "  k / F9       Send signal to process (kill/terminate/sleep)\n"
 				}
 				return ""
 			})() + "\n" +
 			styles.TextBold.Render("Network Tab (3)\n") +
-			"  Tab          Switch sub-panel\n" +
-			"  ↑/↓          Navigate\n" +
-			"  /            Filter\n\n" +
+			"  Tab          Switch sub-panels (Interfaces, Sockets, Routes)\n" +
+			"  ↑/↓          Navigate items\n" +
+			"  /            Filter by interface/address/port\n\n" +
 			styles.TextBold.Render("Docker Tab (4)\n") +
-			"  ↑/↓          Navigate\n" +
-			"  Enter        Container detail\n" +
-			"  l            View logs\n" +
+			"  ↑/↓          Navigate containers\n" +
+			"  Enter        View container details & stats\n" +
+			"  l            Tail container logs\n" +
 			(func() string {
 				if privilege.CanKill() {
-					return "  r            Restart (confirm)\n" +
-						"  s            Stop (confirm)\n"
+					return "  s            Stop container (confirmation required)\n" +
+						"  r            Restart container (confirmation required)\n"
 				}
 				return ""
 			})() +
 			"\n" +
 			styles.TextBold.Render("Services Tab (5)\n") +
-			"  Tab          Switch (services/dmesg)\n" +
-			"  /            Filter\n" +
-			"  a/f/r        Show all/failed/running\n",
+			"  Tab          Switch sub-panels (Services, Kernel Log dmesg, Unit Logs)\n" +
+			"  /            Filter units by name\n" +
+			"  a / f / r    Filter unit status (all / failed / running)\n" +
+			"  l            View logs for highlighted unit\n" +
+			"  Enter        View detailed unit metadata\n" +
+			(func() string {
+				if privilege.CanKill() {
+					btn := "  s            Start unit (confirmation required)\n" +
+						"  x            Stop unit (confirmation required)\n" +
+						"  r            Restart unit (confirmation required)\n"
+					if privilege.IsRoot() {
+						btn += "  e            Enable unit on boot\n" +
+							"  d            Disable unit on boot\n" +
+							"  m            Mask / Unmask unit\n"
+					}
+					return btn
+				}
+				return ""
+			})() +
+			"\n" +
+			styles.TextBold.Render("Terminal Tab (6)\n") +
+			"  i / Enter    Focus terminal input mode (shell captures keys)\n" +
+			"  Esc Esc      Exit focus mode (press Esc twice within 300ms)\n" +
+			"  ↑/↓ / PgUp   Scroll output scrollback (when unfocused)\n\n" +
+			styles.TextBold.Render("Firewall Tab (7)\n") +
+			"  Tab          Switch sub-panels (Active Rules, Quick Actions)\n" +
+			"  a            Launch Add Rule Wizard (port, action, protocol)\n" +
+			"  d            Delete highlighted rule (confirmation required)\n" +
+			"  e            Toggle Firewall enable/disable\n\n" +
+			styles.TextBold.Render("Packages Tab (8)\n") +
+			"  Tab          Switch sub-panels (Installed Packages, Search & Install, Pending Updates)\n" +
+			"  /            Filter installed packages OR enter repo search query\n" +
+			"  Enter        Install highlighted package (in Search sub-panel)\n" +
+			"  r            Remove highlighted package (in Installed sub-panel)\n" +
+			"  u            Run full system package upgrade (requires typed confirmation)\n\n" +
+			styles.TextBold.Render("Users Tab (9)\n") +
+			"  Tab          Switch sub-panels (User Accounts, System Groups, Sudoers Rules)\n" +
+			"  h            Toggle hiding system users (UID < 1000)\n" +
+			"  a            Add new user account (root required)\n" +
+			"  d            Delete user account (root required + confirmation)\n\n" +
+			styles.TextBold.Render("Advanced Tab (0)\n") +
+			"  Tab          Switch sub-panels (Active SSH Sessions, Cron & Timers, Storage Topology)\n" +
+			"  k            Terminate highlighted active SSH login session (root / CAP_KILL required)\n",
 	)
 }

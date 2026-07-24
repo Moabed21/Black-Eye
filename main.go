@@ -17,31 +17,44 @@ import (
 	"blackeye/internal/privilege"
 	"blackeye/internal/registry"
 	"blackeye/internal/resolver"
+	"blackeye/internal/sysdetect"
 	"blackeye/internal/ui"
 
 	auditsvc  "blackeye/internal/services/audit"
+	alertssvc "blackeye/internal/services/alerts"
+	advancedsvc "blackeye/internal/services/advanced"
 	cpusvc    "blackeye/internal/services/cpu"
 	disksvc   "blackeye/internal/services/disk"
 	dmesgsvc  "blackeye/internal/services/dmesg"
 	dockersvc "blackeye/internal/services/docker"
+	firewallsvc "blackeye/internal/services/firewall"
+	initsyssvc "blackeye/internal/services/initsys"
 	iosvc     "blackeye/internal/services/io"
 	memsvc    "blackeye/internal/services/memory"
 	netsvc    "blackeye/internal/services/network"
 	netstatsvc "blackeye/internal/services/netstats"
+	pkgsvc    "blackeye/internal/services/packages"
 	portssvc  "blackeye/internal/services/ports"
 	routingsvc "blackeye/internal/services/routing"
 	swapsvc   "blackeye/internal/services/swap"
 	sysinfosvc "blackeye/internal/services/sysinfo"
 	systemdsvc "blackeye/internal/services/systemd"
 	thermalsvc "blackeye/internal/services/thermal"
+	usersvc   "blackeye/internal/services/users"
 	procsvc   "blackeye/internal/services/process"
 
 	uitabs "blackeye/internal/ui/tabs"
 )
 
 func main() {
-	// 1. Detect privileges.
+	// 1. Detect privileges and system environment.
 	privilege.Init()
+	sysdetect.Detect()
+
+	// Log detected environment for debugging.
+	if os.Getenv("BLACKEYE_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "blackeye: %s\n", sysdetect.Profile().String())
+	}
 
 	// 2. Load configuration (uses defaults if no config file exists).
 	cfgPath := config.DefaultPath
@@ -79,7 +92,13 @@ func main() {
 	ports := portssvc.New(cfg)
 	docker := dockersvc.New(cfg, false)
 	systemd := systemdsvc.New(cfg)
+	initsys := initsyssvc.New(cfg)
+	fw := firewallsvc.New(cfg)
+	pkgs := pkgsvc.New(cfg)
+	usrSvc := usersvc.New(cfg)
+	advSvc := advancedsvc.New(cfg)
 	dmesg := dmesgsvc.New(cfg)
+	alertsMon := alertssvc.New(b, cfg)
 
 	// 6. Register and start all services.
 	reg := registry.New(b)
@@ -96,11 +115,21 @@ func main() {
 	reg.Register(proc)
 	reg.Register(ports)
 	reg.Register(docker)
-	reg.Register(systemd)
+	reg.Register(initsys)
+	reg.Register(fw)
+	reg.Register(pkgs)
+	reg.Register(usrSvc)
+	reg.Register(advSvc)
 	reg.Register(dmesg)
 
 	ctx, cancelSvcs := context.WithCancel(context.Background())
 	defer cancelSvcs()
+
+	// Start alerts monitor in its own goroutine (it subscribes to bus topics
+	// directly and publishes alerts).
+	alertsCtx, cancelAlerts := context.WithCancel(ctx)
+	defer cancelAlerts()
+	go func() { _ = alertsMon.Start(alertsCtx) }()
 
 	// Start audit service separately (it doesn't publish to the bus).
 	auditCtx, cancelAudit := context.WithCancel(ctx)
@@ -119,6 +148,27 @@ func main() {
 	}
 	if dockerTab, ok := root.GetTab(ui.TabDocker).(*uitabs.Docker); ok {
 		dockerTab.SetAudit(audit)
+	}
+	if servicesTab, ok := root.GetTab(ui.TabServices).(*uitabs.Services); ok {
+		servicesTab.SetSystemd(systemd)
+		servicesTab.SetInitSys(initsys)
+		servicesTab.SetAudit(audit)
+	}
+	if fwTab, ok := root.GetTab(ui.TabFirewall).(*uitabs.Firewall); ok {
+		fwTab.SetFirewall(fw)
+		fwTab.SetAudit(audit)
+	}
+	if pkgTab, ok := root.GetTab(ui.TabPackages).(*uitabs.Packages); ok {
+		pkgTab.SetPackages(pkgs)
+		pkgTab.SetAudit(audit)
+	}
+	if usrTab, ok := root.GetTab(ui.TabUsers).(*uitabs.Users); ok {
+		usrTab.SetUsers(usrSvc)
+		usrTab.SetAudit(audit)
+	}
+	if advTab, ok := root.GetTab(ui.TabAdvanced).(*uitabs.Advanced); ok {
+		advTab.SetAdvanced(advSvc)
+		advTab.SetAudit(audit)
 	}
 
 	// 8. Run the TUI.

@@ -101,9 +101,8 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 }
 
-// collect queries systemd via D-Bus for all service units.
-// This uses a raw D-Bus method call to avoid shelling out to systemctl.
-func (s *Service) collect() (Snapshot, error) {
+// CollectSnapshot queries systemd via D-Bus for all service units.
+func CollectSnapshot() (Snapshot, error) {
 	units, err := listUnitsViaDbus()
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("systemd: D-Bus query failed: %w", err)
@@ -125,6 +124,10 @@ func (s *Service) collect() (Snapshot, error) {
 		})
 	}
 	return Snapshot{Units: snapUnits, Available: true, Timestamp: time.Now()}, nil
+}
+
+func (s *Service) collect() (Snapshot, error) {
+	return CollectSnapshot()
 }
 
 func stateDescription(active, sub string) string {
@@ -149,3 +152,19 @@ func stateDescription(active, sub string) string {
 	}
 	return sub
 }
+
+// StartUnit sends a StartUnit D-Bus call for the given unit name.
+func (s *Service) StartUnit(unitName string) error {
+	return unitActionViaDbus("StartUnit", unitName)
+}
+
+// StopUnit sends a StopUnit D-Bus call for the given unit name.
+func (s *Service) StopUnit(unitName string) error {
+	return unitActionViaDbus("StopUnit", unitName)
+}
+
+// RestartUnit sends a RestartUnit D-Bus call for the given unit name.
+func (s *Service) RestartUnit(unitName string) error {
+	return unitActionViaDbus("RestartUnit", unitName)
+}
+

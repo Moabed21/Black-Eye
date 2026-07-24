@@ -16,13 +16,17 @@ var (
 	hasKill    bool
 	isRoot     bool
 	hasDocker  bool
+	hasNetAdmin bool
+	hasPtrace   bool
 )
 
 // Init detects effective privileges. Call once at startup before rendering.
 func Init() {
 	once.Do(func() {
 		isRoot = os.Geteuid() == 0
-		hasKill = isRoot || checkCapKill()
+		hasKill = isRoot || checkCap(5)    // CAP_KILL
+		hasNetAdmin = isRoot || checkCap(12) // CAP_NET_ADMIN
+		hasPtrace = isRoot || checkCap(19)   // CAP_SYS_PTRACE
 		hasDocker = checkDockerSocket()
 	})
 }
@@ -43,10 +47,48 @@ func HasDockerAccess() bool {
 	return hasDocker
 }
 
-// checkCapKill uses the Linux capabilities API to test for CAP_KILL (5).
-func checkCapKill() bool {
-	// Use the prctl/capget syscall to check the effective capability set.
-	// CAP_KILL is capability number 5.
+// CanFirewall reports whether the process can modify firewall rules.
+// Requires CAP_NET_ADMIN or root.
+func CanFirewall() bool {
+	return hasNetAdmin
+}
+
+// CanNetConfig reports whether the process can modify network configuration.
+// Requires CAP_NET_ADMIN or root.
+func CanNetConfig() bool {
+	return hasNetAdmin
+}
+
+// CanPackageManage reports whether the process can install/remove packages.
+// Requires root — there's no fine-grained capability for package management.
+func CanPackageManage() bool {
+	return isRoot
+}
+
+// CanManageUsers reports whether the process can create/delete users.
+// Requires root.
+func CanManageUsers() bool {
+	return isRoot
+}
+
+// CanReadShadow reports whether the process can read /etc/shadow.
+// True if root, or if the process's effective group is 'shadow'.
+func CanReadShadow() bool {
+	if isRoot {
+		return true
+	}
+	_, err := os.Open("/etc/shadow")
+	return err == nil
+}
+
+// CanReadProcIO reports whether the process can read /proc/[pid]/io
+// for other users' processes. Requires CAP_SYS_PTRACE or root.
+func CanReadProcIO() bool {
+	return hasPtrace
+}
+
+// checkCap checks if the current process has the specified Linux capability.
+func checkCap(capNum uint) bool {
 	hdr := unix.CapUserHeader{
 		Version: unix.LINUX_CAPABILITY_VERSION_3,
 		Pid:     0, // 0 = self
@@ -55,8 +97,12 @@ func checkCapKill() bool {
 	if err := unix.Capget(&hdr, &data[0]); err != nil {
 		return false
 	}
-	const capKill = uint32(1 << 5)
-	return data[0].Effective&capKill != 0
+	idx := capNum / 32
+	bit := uint32(1 << (capNum % 32))
+	if idx > 1 {
+		return false
+	}
+	return data[idx].Effective&bit != 0
 }
 
 // checkDockerSocket tests whether the Docker socket is accessible.
@@ -72,3 +118,4 @@ func checkDockerSocket() bool {
 	f.Close()
 	return true
 }
+

@@ -21,6 +21,7 @@ import (
 type Snapshot struct {
 	TotalPercent float64
 	CorePercent  []float64
+	CoreFreqs    []CoreFreq
 	Timestamp    time.Time
 }
 
@@ -125,8 +126,12 @@ func (s *Service) collect() (Snapshot, error) {
 		Timestamp:    time.Now(),
 	}
 	// Per-core (skip index 0 which is the aggregate "cpu" line).
-	for i := 1; i < len(curr) && i < len(prev); i++ {
-		snap.CorePercent = append(snap.CorePercent, pct(prev[i], curr[i]))
+	coreCount := len(curr) - 1
+	if coreCount > 0 {
+		for i := 1; i < len(curr) && i < len(prev); i++ {
+			snap.CorePercent = append(snap.CorePercent, pct(prev[i], curr[i]))
+		}
+		snap.CoreFreqs = readCoreFreqs(coreCount)
 	}
 	return snap, nil
 }

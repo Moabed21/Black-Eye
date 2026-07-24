@@ -56,6 +56,12 @@ type Dashboard struct {
 	layout     [][]string
 	bounds     map[string]PanelBounds
 	dragTarget string
+
+	// Sparkline history buffers.
+	cpuHistory *styles.Sparkline
+	memHistory *styles.Sparkline
+	netRxHist  map[string]*styles.Sparkline
+	netTxHist  map[string]*styles.Sparkline
 }
 
 type PanelBounds struct {
@@ -85,6 +91,12 @@ func NewDashboard(b *bus.Bus, cfg config.Config) *Dashboard {
 	}
 	d.bounds = make(map[string]PanelBounds)
 
+	// Initialize sparklines (60 samples = ~2 min at 2s interval).
+	d.cpuHistory = styles.NewSparkline(60, 0, 100)
+	d.memHistory = styles.NewSparkline(60, 0, 100)
+	d.netRxHist = make(map[string]*styles.Sparkline)
+	d.netTxHist = make(map[string]*styles.Sparkline)
+
 	return d
 }
 
@@ -112,11 +124,13 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case d.subCPU:
 			if v, ok := m.data.(cpu.Snapshot); ok {
 				d.cpuSnap = &v
+				d.cpuHistory.Push(v.TotalPercent)
 			}
 			cmd = listenChan(d.subCPU, "cpu")
 		case d.subMem:
 			if v, ok := m.data.(memory.Snapshot); ok {
 				d.memSnap = &v
+				d.memHistory.Push(v.UsedPercent)
 			}
 			cmd = listenChan(d.subMem, "memory")
 		case d.subSwap:
@@ -137,6 +151,15 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case d.subNet:
 			if v, ok := m.data.(network.Snapshot); ok {
 				d.netSnap = &v
+				// Update per-interface sparklines.
+				for _, iface := range v.Ifaces {
+					if _, ok := d.netRxHist[iface.DisplayName]; !ok {
+						d.netRxHist[iface.DisplayName] = styles.NewSparkline(60, 0, 0) // auto-scale max to peak throughput
+						d.netTxHist[iface.DisplayName] = styles.NewSparkline(60, 0, 0)
+					}
+					d.netRxHist[iface.DisplayName].Push(iface.RxMBs)
+					d.netTxHist[iface.DisplayName].Push(iface.TxMBs)
+				}
 			}
 			cmd = listenChan(d.subNet, "network")
 		case d.subThermal:
@@ -427,11 +450,31 @@ func (d *Dashboard) renderCPU(targetWidth, targetHeight int) string {
 		styles.Colorize(fmt.Sprintf("%5.1f%%", s.TotalPercent), s.TotalPercent, warn, crit),
 		totalBar)
 
+	// Sparkline history.
+	sparkW := targetWidth - 14
+	if sparkW < 10 {
+		sparkW = 20
+	}
+	sparkColor := styles.ColorGreen
+	if s.TotalPercent >= crit {
+		sparkColor = styles.ColorRed
+	} else if s.TotalPercent >= warn {
+		sparkColor = styles.ColorGold
+	}
+	sparkLine := "  Trend (2m) " + d.cpuHistory.Render(sparkW, sparkColor)
+
 	var coreLines []string
 	for i, p := range s.CorePercent {
 		bar := styles.Bar(p, 20, warn, crit)
-		coreLines = append(coreLines, fmt.Sprintf("  Core%-2d: %s  %s",
-			i, styles.Colorize(fmt.Sprintf("%5.1f%%", p), p, warn, crit), bar))
+		freqStr := ""
+		if i < len(s.CoreFreqs) && s.CoreFreqs[i].FreqMHz > 0 {
+			freqStr = fmt.Sprintf("  (%.0f MHz)", s.CoreFreqs[i].FreqMHz)
+			if s.CoreFreqs[i].Governor != "" {
+				freqStr += " [" + s.CoreFreqs[i].Governor + "]"
+			}
+		}
+		coreLines = append(coreLines, fmt.Sprintf("  Core%-2d: %s  %s%s",
+			i, styles.Colorize(fmt.Sprintf("%5.1f%%", p), p, warn, crit), bar, styles.TextMuted.Render(freqStr)))
 	}
 
 	tempLine := ""
@@ -442,7 +485,7 @@ func (d *Dashboard) renderCPU(targetWidth, targetHeight int) string {
 			d.cfg.Alerts.TempWarning, d.cfg.Alerts.TempCritical)
 	}
 
-	body := title + "\n" + totalLine + "\n" + strings.Join(coreLines, "\n") + tempLine
+	body := title + "\n" + totalLine + "\n" + sparkLine + "\n" + strings.Join(coreLines, "\n") + tempLine
 	return style.Render(body)
 }
 
@@ -471,6 +514,22 @@ func (d *Dashboard) renderMemory(targetWidth, targetHeight int) string {
 				bar,
 				styles.Colorize(fmt.Sprintf("%.0f%%", m.UsedPercent), m.UsedPercent, warn, crit),
 			),
+		)
+
+		// Memory sparkline.
+		sparkW := targetWidth - 14
+		if sparkW < 10 {
+			sparkW = 20
+		}
+		sparkColor := styles.ColorGreen
+		if m.UsedPercent >= crit {
+			sparkColor = styles.ColorRed
+		} else if m.UsedPercent >= warn {
+			sparkColor = styles.ColorGold
+		}
+		lines = append(lines, "  Trend (2m) "+d.memHistory.Render(sparkW, sparkColor))
+
+		lines = append(lines,
 			fmt.Sprintf("  Buffers: %s  │  Cache: %s  │  Available: %s",
 				resolver.FormatBytes(uint64(m.BuffersGiB*1024*1024*1024)),
 				resolver.FormatBytes(uint64(m.CachedGiB*1024*1024*1024)),
@@ -517,27 +576,26 @@ func (d *Dashboard) renderDisk(targetWidth, targetHeight int) string {
 	var lines []string
 	for _, dk := range d.diskSnap.Disks {
 		bar := styles.Bar(dk.UsedPercent, 20, warn, crit)
-		ioLine := ""
+		
+		var details []string
 		if d.ioSnap != nil {
 			for _, dev := range d.ioSnap.Devices {
 				if strings.Contains(dk.Device, dev.Device) {
-					ioLine = fmt.Sprintf("  I/O: ↓ %.1f MB/s  ↑ %.1f MB/s", dev.ReadMBs, dev.WriteMBs)
+					details = append(details, fmt.Sprintf("I/O: ↓ %.1f MB/s  ↑ %.1f MB/s", dev.ReadMBs, dev.WriteMBs))
 					break
 				}
 			}
 		}
-		inodeLine := fmt.Sprintf("  Inodes: %d used  %.0f%%",
-			dk.InodesTotal-dk.InodesFree,
-			dk.InodesPercent)
+		details = append(details, fmt.Sprintf("Inodes: %.0f%% used (%d free)", dk.InodesPercent, dk.InodesFree))
 
-		lines = append(lines, fmt.Sprintf("  %s\n    %s / %s  %s  %s%s%s",
+		lines = append(lines, fmt.Sprintf("  %s %s\n    %s / %s  %s  %s\n    %s",
 			styles.TextAccent.Render(dk.DisplayMount),
+			styles.TextMuted.Render(fmt.Sprintf("— %s (%s)", dk.Device, dk.FSType)),
 			styles.Colorize(resolver.FormatBytes(uint64(dk.UsedGiB*1024*1024*1024)), dk.UsedPercent, warn, crit),
 			resolver.FormatBytes(uint64(dk.TotalGiB*1024*1024*1024)),
 			bar,
 			styles.Colorize(fmt.Sprintf("%.0f%%", dk.UsedPercent), dk.UsedPercent, warn, crit),
-			ioLine,
-			inodeLine,
+			styles.TextMuted.Render(strings.Join(details, "  │  ")),
 		))
 	}
 
@@ -573,6 +631,19 @@ func (d *Dashboard) renderNetwork(targetWidth, targetHeight int) string {
 			resolver.FormatRate(iface.TxMBs*1024*1024),
 			errStr,
 		))
+
+		// Per-interface sparklines on separate rows for clarity.
+		sparkW := (targetWidth - 18) / 2
+		if sparkW < 10 {
+			sparkW = 15
+		}
+		if rxHist, ok := d.netRxHist[iface.DisplayName]; ok {
+			rxSpark := rxHist.Render(sparkW, styles.ColorGreen)
+			txSpark := d.netTxHist[iface.DisplayName].Render(sparkW, styles.ColorNavyLight)
+			if rxSpark != "" || txSpark != "" {
+				lines = append(lines, fmt.Sprintf("    ↓ RX %s   ↑ TX %s", rxSpark, txSpark))
+			}
+		}
 	}
 	if len(lines) == 0 {
 		lines = append(lines, "  No active interfaces")

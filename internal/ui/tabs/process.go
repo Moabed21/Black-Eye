@@ -29,6 +29,7 @@ const (
 	sortPID sortColumn = iota
 	sortCPU
 	sortMem
+	sortIO
 	sortName
 )
 
@@ -42,6 +43,7 @@ type Process struct {
 	procs       []process.ProcessSnapshot
 	sortCol     sortColumn
 	sortReverse bool
+	treeMode    bool // true = hierarchy tree view with ├── └── connectors
 	cursor      int
 	filter      string
 	filterMode  bool
@@ -71,6 +73,8 @@ var sortMenuItems = []struct {
 	{"CPU% (Ascending)", sortCPU, true},
 	{"Memory (Descending)", sortMem, false},
 	{"Memory (Ascending)", sortMem, true},
+	{"I/O Rate (Descending)", sortIO, false},
+	{"I/O Rate (Ascending)", sortIO, true},
 	{"PID (Ascending)", sortPID, false},
 	{"PID (Descending)", sortPID, true},
 	{"Name (Ascending)", sortName, false},
@@ -242,7 +246,9 @@ func (p *Process) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			p.cursor++
 		}
 	case "s":
-		p.sortCol = (p.sortCol + 1) % 4
+		p.sortCol = (p.sortCol + 1) % 5
+	case "t":
+		p.treeMode = !p.treeMode
 	case "r":
 		p.sortReverse = !p.sortReverse
 	case "f6":
@@ -363,6 +369,12 @@ func (p *Process) filtered() []process.ProcessSnapshot {
 func (p *Process) sorted() []process.ProcessSnapshot {
 	procs := make([]process.ProcessSnapshot, len(p.procs))
 	copy(procs, p.procs)
+
+	if p.treeMode {
+		roots := process.BuildProcessTree(procs)
+		return process.FlattenTree(roots)
+	}
+
 	sort.Slice(procs, func(i, j int) bool {
 		var less bool
 		switch p.sortCol {
@@ -372,6 +384,8 @@ func (p *Process) sorted() []process.ProcessSnapshot {
 			less = procs[i].CPUPercent > procs[j].CPUPercent
 		case sortMem:
 			less = procs[i].MemoryMiB > procs[j].MemoryMiB
+		case sortIO:
+			less = (procs[i].ReadBps + procs[i].WriteBps) > (procs[j].ReadBps + procs[j].WriteBps)
 		case sortName:
 			less = procs[i].DisplayName < procs[j].DisplayName
 		}
@@ -394,25 +408,36 @@ func (p *Process) renderTable() string {
 	// Header row.
 	cols := []string{
 		fmt.Sprintf("%-6s", "PID"),
-		fmt.Sprintf("%-30s", "Name"),
-		fmt.Sprintf("%-12s", "Owner"),
+		fmt.Sprintf("%-32s", "Name"),
+		fmt.Sprintf("%-10s", "Owner"),
 		fmt.Sprintf("%-7s", "CPU%"),
-		fmt.Sprintf("%-10s", "Memory"),
-		fmt.Sprintf("%-18s", "Status"),
-		fmt.Sprintf("%-14s", "Started"),
+		fmt.Sprintf("%-9s", "Memory"),
+		fmt.Sprintf("%-10s", "↓ Read"),
+		fmt.Sprintf("%-10s", "↑ Write"),
+		fmt.Sprintf("%-12s", "Status"),
 	}
 	header := styles.TableHeader.Render(strings.Join(cols, "  "))
 
 	var rows []string
 	for i, proc := range p.filtered() {
-		line := fmt.Sprintf("%-6d  %-30s  %-12s  %6.1f%%  %9.1f MiB  %-18s  %-14s",
+		readStr := "-"
+		writeStr := "-"
+		if proc.ReadBps > 0 {
+			readStr = resolver.FormatRate(proc.ReadBps)
+		}
+		if proc.WriteBps > 0 {
+			writeStr = resolver.FormatRate(proc.WriteBps)
+		}
+
+		line := fmt.Sprintf("%-6d  %-32s  %-10s  %6.1f%%  %8.1f MiB  %10s  %10s  %-12s",
 			proc.PID,
-			styles.Truncate(proc.DisplayName, 30),
-			styles.Truncate(proc.Owner, 12),
+			styles.Truncate(proc.DisplayName, 32),
+			styles.Truncate(proc.Owner, 10),
 			proc.CPUPercent,
 			proc.MemoryMiB,
-			styles.Truncate(proc.DisplayStatus, 18),
-			proc.StartedAt,
+			readStr,
+			writeStr,
+			styles.Truncate(proc.DisplayStatus, 12),
 		)
 		style := styles.TableRow
 		if i == p.cursor {
@@ -486,8 +511,14 @@ func (p *Process) renderTable() string {
 		sortDialog = "\n\n  " + strings.Join(menuRows, "\n  ")
 	}
 
-	sortLabel := []string{"PID", "CPU", "Memory", "Name"}[p.sortCol]
-	title := styles.PanelTitleStyle.Render(fmt.Sprintf("  Processes  │  Sort: %s %s  │  Total: %d",
+	sortLabel := []string{"PID", "CPU", "Memory", "I/O", "Name"}[p.sortCol]
+	viewModeStr := "[List]"
+	if p.treeMode {
+		viewModeStr = "[Tree]"
+	}
+
+	title := styles.PanelTitleStyle.Render(fmt.Sprintf("  Processes %s  │  Sort: %s %s  │  Total: %d",
+		viewModeStr,
 		sortLabel, func() string {
 			if p.sortReverse {
 				return "↑"
@@ -505,10 +536,14 @@ func (p *Process) renderTable() string {
 }
 
 func (p *Process) renderDetail(proc process.ProcessSnapshot) string {
+	readStr := resolver.FormatRate(proc.ReadBps)
+	writeStr := resolver.FormatRate(proc.WriteBps)
+
 	lines := []string{
 		styles.PanelTitleStyle.Render(fmt.Sprintf("  Process Detail: %s", proc.DisplayName)),
-		fmt.Sprintf("  PID: %d  │  Owner: %s  │  Status: %s", proc.PID, proc.Owner, proc.DisplayStatus),
+		fmt.Sprintf("  PID: %d (PPID: %d)  │  Owner: %s  │  Status: %s", proc.PID, proc.PPID, proc.Owner, proc.DisplayStatus),
 		fmt.Sprintf("  Started: %s  │  CPU: %.1f%%  │  Memory: %.1f MiB", proc.StartedAt, proc.CPUPercent, proc.MemoryMiB),
+		fmt.Sprintf("  Disk I/O:  Read: %s  │  Write: %s", readStr, writeStr),
 		"",
 		fmt.Sprintf("  Command:  %s", styles.Truncate(proc.FullCmdLine, p.width-15)),
 		fmt.Sprintf("  Open FDs: %d", proc.OpenFDs),

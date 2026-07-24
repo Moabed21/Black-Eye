@@ -22,11 +22,14 @@ import (
 // ProcessSnapshot holds one process entry for the table.
 type ProcessSnapshot struct {
 	PID           int
+	PPID          int
 	DisplayName   string  // "nginx (Web Server)"
 	RawName       string  // "nginx"  — used for TOCTOU re-check
 	Owner         string  // "www-data"
 	CPUPercent    float64
 	MemoryMiB     float64
+	ReadBps       float64 // I/O read bytes/sec
+	WriteBps      float64 // I/O write bytes/sec
 	DisplayStatus string  // "S (Sleeping)"
 	StartedAt     string  // "Today 14:32" or "Jun 28 09:11"
 	// Detail panel fields (populated lazily on demand).
@@ -46,6 +49,12 @@ type cpuAccum struct {
 	at    time.Time
 }
 
+type ioAccum struct {
+	readBytes  uint64
+	writeBytes uint64
+	at         time.Time
+}
+
 // Service collects process list from /proc.
 type Service struct {
 	interval  time.Duration
@@ -53,6 +62,7 @@ type Service struct {
 	health    atomic.Value
 	mu        sync.Mutex
 	prevCPU   map[int]cpuAccum
+	prevIO    map[int]ioAccum
 	bootTime  uint64
 	clkTck    float64
 	cancel    context.CancelFunc
@@ -63,6 +73,7 @@ func New(cfg config.Config) *Service {
 		interval: time.Duration(cfg.Refresh.ProcessInterval) * time.Second,
 		out:      make(chan interface{}, 4),
 		prevCPU:  make(map[int]cpuAccum),
+		prevIO:   make(map[int]ioAccum),
 		clkTck:   100.0, // SC_CLK_TCK default — 100Hz on most Linux systems
 	}
 	s.health.Store(services.HealthStatus{State: services.HealthOK})
@@ -113,7 +124,9 @@ func (s *Service) collect() (Snapshot, error) {
 
 	s.mu.Lock()
 	prevCPU := s.prevCPU
+	prevIO := s.prevIO
 	newCPU := make(map[int]cpuAccum)
+	newIO := make(map[int]ioAccum)
 	s.mu.Unlock()
 
 	for _, e := range entries {
@@ -125,7 +138,7 @@ func (s *Service) collect() (Snapshot, error) {
 			continue
 		}
 
-		p, err := s.readProcess(pid, now, prevCPU, newCPU)
+		p, err := s.readProcess(pid, now, prevCPU, newCPU, prevIO, newIO)
 		if err != nil {
 			continue // process may have exited
 		}
@@ -134,6 +147,7 @@ func (s *Service) collect() (Snapshot, error) {
 
 	s.mu.Lock()
 	s.prevCPU = newCPU
+	s.prevIO = newIO
 	s.mu.Unlock()
 
 	return Snapshot{Processes: procs, Timestamp: now}, nil
@@ -163,7 +177,7 @@ func FetchDetails(p *ProcessSnapshot) {
 	}
 }
 
-func (s *Service) readProcess(pid int, now time.Time, prev, newMap map[int]cpuAccum) (ProcessSnapshot, error) {
+func (s *Service) readProcess(pid int, now time.Time, prevCPU, newCPU map[int]cpuAccum, prevIO, newIO map[int]ioAccum) (ProcessSnapshot, error) {
 	base := fmt.Sprintf("/proc/%d", pid)
 
 	// Parse /proc/<pid>/status for name, uid, state, vmrss.
@@ -182,12 +196,25 @@ func (s *Service) readProcess(pid int, now time.Time, prev, newMap map[int]cpuAc
 
 	// CPU percent.
 	totalJiffies := stat.utime + stat.stime
-	newMap[pid] = cpuAccum{total: totalJiffies, at: now}
+	newCPU[pid] = cpuAccum{total: totalJiffies, at: now}
 	var cpuPct float64
-	if p, ok := prev[pid]; ok {
+	if p, ok := prevCPU[pid]; ok {
 		elapsed := now.Sub(p.at).Seconds()
 		if elapsed > 0 {
 			cpuPct = float64(totalJiffies-p.total) / s.clkTck / elapsed * 100
+		}
+	}
+
+	// Read I/O stats from /proc/<pid>/io (if accessible)
+	var readBps, writeBps float64
+	if ioData, err := parseIO(filepath.Join(base, "io")); err == nil {
+		newIO[pid] = ioAccum{readBytes: ioData.readBytes, writeBytes: ioData.writeBytes, at: now}
+		if p, ok := prevIO[pid]; ok {
+			elapsed := now.Sub(p.at).Seconds()
+			if elapsed > 0 && ioData.readBytes >= p.readBytes && ioData.writeBytes >= p.writeBytes {
+				readBps = float64(ioData.readBytes-p.readBytes) / elapsed
+				writeBps = float64(ioData.writeBytes-p.writeBytes) / elapsed
+			}
 		}
 	}
 
@@ -196,11 +223,14 @@ func (s *Service) readProcess(pid int, now time.Time, prev, newMap map[int]cpuAc
 
 	return ProcessSnapshot{
 		PID:           pid,
+		PPID:          stat.ppid,
 		DisplayName:   resolver.ProcName(status.name, cmdline),
 		RawName:       status.name,
 		Owner:         resolver.ByUID(status.uid),
 		CPUPercent:    cpuPct,
 		MemoryMiB:     float64(status.vmRSSKiB) / 1024.0,
+		ReadBps:       readBps,
+		WriteBps:      writeBps,
 		DisplayStatus: resolver.ProcStateStr(status.state),
 		StartedAt:     formatStartTime(stat.starttime, s.bootTime, s.clkTck),
 		FullCmdLine:   strings.ReplaceAll(cmdline, "\x00", " "),
@@ -274,6 +304,7 @@ func parseStatus(path string) (statusFields, error) {
 }
 
 type statFields struct {
+	ppid         int
 	utime, stime uint64
 	starttime    uint64
 }
@@ -295,10 +326,43 @@ func parseStat(path string) (statFields, error) {
 	if len(fields) < 20 {
 		return statFields{}, fmt.Errorf("stat too short")
 	}
+	ppid, _ := strconv.Atoi(fields[1])
 	utime, _ := strconv.ParseUint(fields[11], 10, 64)
 	stime, _ := strconv.ParseUint(fields[12], 10, 64)
 	start, _ := strconv.ParseUint(fields[19], 10, 64)
-	return statFields{utime: utime, stime: stime, starttime: start}, nil
+	return statFields{ppid: ppid, utime: utime, stime: stime, starttime: start}, nil
+}
+
+type ioFields struct {
+	readBytes  uint64
+	writeBytes uint64
+}
+
+func parseIO(path string) (ioFields, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return ioFields{}, err
+	}
+	defer f.Close()
+
+	var iof ioFields
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		switch key {
+		case "read_bytes":
+			iof.readBytes, _ = strconv.ParseUint(val, 10, 64)
+		case "write_bytes":
+			iof.writeBytes, _ = strconv.ParseUint(val, 10, 64)
+		}
+	}
+	return iof, scanner.Err()
 }
 
 func readCmdline(path string) string {

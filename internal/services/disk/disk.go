@@ -102,14 +102,39 @@ func collect() (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
-	const gib = 1024.0 * 1024.0 * 1024.0
-	var disks []DiskSnapshot
-	seen := make(map[string]bool)
-
+	// Filter and prioritize mounts (root '/' first, then shorter mount paths).
+	var filtered []mountEntry
 	for _, m := range mounts {
 		if excludedFS[m.fsType] {
 			continue
 		}
+		// Skip container, snap, flatpak, and virtual mount paths
+		if strings.HasPrefix(m.mountPoint, "/var/lib/docker") ||
+			strings.HasPrefix(m.mountPoint, "/var/lib/containers") ||
+			strings.HasPrefix(m.mountPoint, "/snap") ||
+			strings.HasPrefix(m.mountPoint, "/flatpak") ||
+			strings.HasPrefix(m.mountPoint, "/run/credentials") ||
+			strings.HasPrefix(m.mountPoint, "/proc") ||
+			strings.HasPrefix(m.mountPoint, "/sys") {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+
+	// Sort filtered mounts so '/' comes first, then by shortest mount path
+	for i := 0; i < len(filtered); i++ {
+		for j := i + 1; j < len(filtered); j++ {
+			if filtered[j].mountPoint == "/" || (filtered[i].mountPoint != "/" && len(filtered[j].mountPoint) < len(filtered[i].mountPoint)) {
+				filtered[i], filtered[j] = filtered[j], filtered[i]
+			}
+		}
+	}
+
+	const gib = 1024.0 * 1024.0 * 1024.0
+	var disks []DiskSnapshot
+	seen := make(map[string]bool)
+
+	for _, m := range filtered {
 		if seen[m.device] {
 			continue // deduplicate bind mounts of same device
 		}
@@ -123,10 +148,19 @@ func collect() (Snapshot, error) {
 		blockSize := uint64(stat.Bsize)
 		total := stat.Blocks * blockSize
 		free := stat.Bfree * blockSize
+		avail := stat.Bavail * blockSize
 		used := total - free
 
+		if total == 0 {
+			continue
+		}
+
+		// Calculate UsedPercent matching 'df' (Used / (Used + Available))
 		var pct float64
-		if total > 0 {
+		nonRootTotal := used + avail
+		if nonRootTotal > 0 {
+			pct = float64(used) / float64(nonRootTotal) * 100
+		} else if total > 0 {
 			pct = float64(used) / float64(total) * 100
 		}
 
@@ -142,7 +176,7 @@ func collect() (Snapshot, error) {
 			FSType:        m.fsType,
 			TotalGiB:      float64(total) / gib,
 			UsedGiB:       float64(used) / gib,
-			FreeGiB:       float64(free) / gib,
+			FreeGiB:       float64(avail) / gib, // Available to user
 			UsedPercent:   pct,
 			InodesTotal:   stat.Files,
 			InodesFree:    stat.Ffree,

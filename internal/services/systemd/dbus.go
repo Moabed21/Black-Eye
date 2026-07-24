@@ -239,3 +239,124 @@ func extractUnitsFromBytes(data []byte) []unitInfo {
 	}
 	return units
 }
+
+// unitActionViaDbus sends a StartUnit, StopUnit, or RestartUnit D-Bus method call.
+// method must be one of "StartUnit", "StopUnit", "RestartUnit".
+// unitName is the full systemd unit name (e.g., "nginx.service").
+func unitActionViaDbus(method, unitName string) error {
+	conn, err := net.Dial("unix", dbusSocket)
+	if err != nil {
+		return fmt.Errorf("dbus dial: %w", err)
+	}
+	defer conn.Close()
+
+	if err := dbusAuth(conn); err != nil {
+		return err
+	}
+
+	msg := buildUnitActionMsg(method, unitName, "replace")
+	if _, err := conn.Write(msg); err != nil {
+		return fmt.Errorf("dbus write: %w", err)
+	}
+
+	// Read reply to check for errors.
+	return readActionReply(conn)
+}
+
+// buildUnitActionMsg constructs a D-Bus method call for unit actions.
+// These methods take two string arguments: (unit_name, mode).
+// Signature: "ss"
+func buildUnitActionMsg(method, unitName, mode string) []byte {
+	const (
+		dest  = "org.freedesktop.systemd1"
+		path  = "/org/freedesktop/systemd1"
+		iface = "org.freedesktop.systemd1.Manager"
+	)
+
+	// Build the body: two D-Bus strings (length-prefixed + NUL).
+	var body []byte
+	body = appendUint32LE(body, uint32(len(unitName)))
+	body = append(body, unitName...)
+	body = append(body, 0) // NUL terminator
+	// Pad to 4-byte alignment for the next string.
+	for len(body)%4 != 0 {
+		body = append(body, 0)
+	}
+	body = appendUint32LE(body, uint32(len(mode)))
+	body = append(body, mode...)
+	body = append(body, 0) // NUL terminator
+
+	// Build header fields array.
+	var hdr []byte
+	hdr = appendHeaderField(hdr, 1, 'o', path)   // OBJECT_PATH
+	hdr = appendHeaderField(hdr, 2, 's', iface)   // INTERFACE
+	hdr = appendHeaderField(hdr, 3, 's', method)  // MEMBER
+	hdr = appendHeaderField(hdr, 6, 's', dest)    // DESTINATION
+	// SIGNATURE field (code 8) — the body contains "ss" (two strings).
+	hdr = appendSignatureField(hdr, "ss")
+
+	// Pad header array to 8-byte boundary.
+	for len(hdr)%8 != 0 {
+		hdr = append(hdr, 0)
+	}
+
+	// Fixed message header.
+	var buf []byte
+	buf = append(buf, 'l')                           // little-endian
+	buf = append(buf, 1)                             // METHOD_CALL
+	buf = append(buf, 0)                             // flags
+	buf = append(buf, 1)                             // protocol version
+	buf = appendUint32LE(buf, uint32(len(body)))     // body length
+	buf = appendUint32LE(buf, 2)                     // serial (different from ListUnits)
+	buf = appendUint32LE(buf, uint32(len(hdr)))      // header array length
+	buf = append(buf, hdr...)
+	buf = append(buf, body...)
+
+	return buf
+}
+
+// appendSignatureField adds the SIGNATURE header field (code 8).
+// Signature fields use a single-byte-length signature (not uint32).
+func appendSignatureField(b []byte, sig string) []byte {
+	// Align to 8-byte boundary (struct alignment).
+	for len(b)%8 != 0 {
+		b = append(b, 0)
+	}
+	b = append(b, 8)                   // field code: SIGNATURE
+	b = append(b, 1, 'g', 0)          // variant sig: 'g' (signature type)
+	b = append(b, byte(len(sig)))     // signature length (single byte)
+	b = append(b, sig...)
+	b = append(b, 0)                  // NUL terminator
+	return b
+}
+
+// readActionReply reads the D-Bus reply and checks for errors.
+func readActionReply(conn net.Conn) error {
+	buf := make([]byte, 8*1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("dbus read: %w", err)
+	}
+	if n < 16 {
+		return fmt.Errorf("dbus reply too short (%d bytes)", n)
+	}
+
+	// Check message type: byte 1.
+	// 1 = METHOD_CALL, 2 = METHOD_RETURN (success), 3 = ERROR.
+	msgType := buf[1]
+	if msgType == 3 {
+		// Error reply — try to extract the error name from the header.
+		reply := string(buf[:n])
+		// Look for common D-Bus error strings.
+		if strings.Contains(reply, "AccessDenied") {
+			return fmt.Errorf("access denied — elevated privileges required")
+		}
+		if strings.Contains(reply, "NoSuchUnit") {
+			return fmt.Errorf("unit not found")
+		}
+		return fmt.Errorf("D-Bus error in reply")
+	}
+
+	return nil
+}
+
