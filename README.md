@@ -1,136 +1,180 @@
-# BlackEye — Linux System Administration Dashboard
+# BlackEye v1.2.1 — Linux System Administration Dashboard
 
-A real-time TUI (Terminal User Interface) system monitor built in Go. BlackEye reads directly from `/proc`, `/sys`, and system sockets — no `os/exec` shelling, no external commands.
+![Version](https://img.shields.io/badge/version-1.2.1-gold.svg)
+![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Go Version](https://img.shields.io/badge/go-%E2%89%A51.21-00ADD8.svg)
+
+A real-time, high-performance TUI (Terminal User Interface) system monitor and administration dashboard built in Go. BlackEye reads directly from Linux kernel virtual filesystems (`/proc`, `/sys`), D-Bus, and system sockets with zero external binary dependencies.
 
 ```
-┌─[1] Dashboard─[2] Processes─[3] Network─[4] Docker─[5] Services──────────┐
-│  System Info                                                               │
-│  Hostname: myserver  │  Uptime: 14 days  │  Kernel: 6.12.5-amd64          │
-│                                                                            │
-│  CPU                                                                       │
-│  Total:  23.4%  ███████░░░░░░░░░░░░░░░░░░░░░░                             │
-│  Core0:  31.2%  ██████████░░░░░░░░░░                                       │
-│  Core1:  15.6%  ████░░░░░░░░░░░░░░░░                                       │
-│                                                                            │
-│  Memory                                                                    │
-│  RAM:  5.2 GiB / 15.6 GiB  ████████████░░░░░░░░░░░░  33%                 │
-│  Swap: 0.1 GiB /  4.0 GiB  █░░░░░░░░░░░░░░░░░░░░░░░   3%                │
-└────────────────────────────────────────────────────────────────────────────┘
-  BlackEye  │  ● normal                           q quit  │  ? help  │  1–5 tabs
+┌─[1] Dashboard─[2] Processes─[3] Network─[4] Docker─[5] Services─[6] Terminal─[7] Firewall─[8] Packages─[9] Users─[0] Advanced─┐
+│  System Info                                                                                                                   │
+│  Hostname: myserver  │  Uptime: 14 days  │  Kernel: 6.12.5-amd64  │  OS: Linux x86_64                                          │
+│                                                                                                                                │
+│  CPU                                                                                                                           │
+│  Total:  23.4%  ███████░░░░░░░░░░░░░░░░░░░░░░                                                                                  │
+│  Core0:  31.2%  ██████████░░░░░░░░░░                                                                                           │
+│  Core1:  15.6%  ████░░░░░░░░░░░░░░░░                                                                                           │
+│                                                                                                                                │
+│  Memory                                                                                                                        │
+│  RAM:  5.2 GiB / 15.6 GiB  ████████████░░░░░░░░░░░░  33%                                                                     │
+│  Swap: 0.1 GiB /  4.0 GiB  █░░░░░░░░░░░░░░░░░░░░░░░   3%                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+  BlackEye v1.2.1  │  ● normal                                                                      q quit  │  ? help  │  1–9,0 tabs
 ```
 
-**Theme:** Features a sleek **Navy Blue & Gold** premium color palette, with dynamic highlighting and flagged row warnings (⚠).
+**Theme:** Premium **Navy Blue & Gold** color palette with dynamic highlighting, alert toasts (⚠/🔴), and drag-and-drop panel header positioning.
+
+---
+
+## What's New in v1.2.1
+
+- **Embedded PTY Terminal Engine (Tab 6)**: Built-in pseudoterminal shell launcher with a column-based cursor engine supporting Starship, Zsh, Bash, Htop, Vim, ANSI 256/TrueColor, and OSC title sequence filtering.
+- **Expanded 10-Tab Dashboard Suite**: Added dedicated tabs for **Firewall** management, **Package Manager** operations, **User Security & Sudoers Audit**, and **Advanced Storage Topology & SSH Sessions**.
+- **22 Independent Microservices**: Expanded backend collectors with zero-allocation line parsers for low heap overhead and low CPU consumption.
+- **Scrollable Help Overlay (`?`)**: Full viewport scrolling (`↑`/`↓`/`PgUp`/`PgDn`) for the interactive shortcuts guide.
+- **Comprehensive Unit Test Suite**: 26 unit test packages covering lifecycles, health statuses, and edge cases.
+
+---
 
 ## Quick Start
 
 ```bash
-# 1. Install dependencies and build
+# 1. Build the binary
 make
 
-# 2. Run (normal user — read-only mode)
+# 2. Run as normal user (read-only monitoring mode)
 ./blackeye
 
-# 3. Run with elevated privileges (enables process kill / container stop)
+# 3. Run with root privileges (enables process signals, firewall wizard, service controls)
 sudo ./blackeye
+
+# 4. Run full test suite with coverage report
+make test
 ```
+
+---
 
 ## Requirements
 
-| Requirement      | Version     | Notes                            |
-|-----------------|-------------|----------------------------------|
-| **Go**          | ≥ 1.21      | Build only                       |
-| **Linux**       | ≥ 4.x       | Uses `/proc`, `/sys`             |
-| **Terminal**    | ≥ 80×24     | 256-color support recommended    |
-| **Docker** (optional) | Any   | For Tab 4                        |
-| **systemd** (optional) | Any  | For Tab 5                        |
+| Requirement | Version | Notes |
+| :--- | :--- | :--- |
+| **Go** | ≥ 1.21 | Build & compile |
+| **Linux** | ≥ 4.x | Kernel `/proc` & `/sys` interfaces |
+| **Terminal** | ≥ 80×24 | 256-color or TrueColor recommended |
+| **Docker** *(optional)* | Any | For Container Tab 4 |
+| **Systemd** *(optional)* | Any | For Services Tab 5 (auto-detects SysVinit/OpenRC) |
+
+---
 
 ## Architecture
 
-BlackEye follows a **microservices-inspired architecture** where each data collector is an independent service with its own goroutine, lifecycle, and health status:
+BlackEye implements a decoupled, fan-out event bus architecture bridging 22 background microservices to 10 TUI tab views:
 
 ```
 main.go
-  ├── config/       → TOML configuration with defaults
-  ├── privilege/    → Detects root/CAP_KILL at startup
-  ├── resolver/     → Human-friendly name mapping
-  ├── bus/          → Fan-out event bus (thread-safe)
-  ├── registry/     → Service lifecycle manager
-  ├── services/     → 16 independent data collectors
-  │   ├── audit/        Append-only audit logger
+  ├── config/       → TOML configuration loader with fallback defaults
+  ├── privilege/    → Startup POSIX capability & root EUID detector
+  ├── sysdetect/    → Hardware, VM, Cloud, and Init-system detector
+  ├── resolver/     → Human-friendly name mapping (ports, PIDs, UIDs, mounts)
+  ├── bus/          → Fan-out event bus with non-blocking pub/sub
+  ├── registry/     → Service lifecycle orchestrator & goroutine bridge
+  ├── services/     → 22 independent data collectors
+  │   ├── advanced/     Active SSH logins, cron/timers, storage topology
+  │   ├── alerts/       Rule-based threshold alert engine
+  │   ├── audit/        Append-only security action logger
   │   ├── cpu/          Per-core CPU % from /proc/stat
-  │   ├── memory/       RAM usage from /proc/meminfo
-  │   ├── swap/         Swap usage from /proc/meminfo
-  │   ├── thermal/      Temperatures from /sys/class/thermal
-  │   ├── sysinfo/      Hostname, kernel, uptime, load avg
-  │   ├── disk/         Mountpoints + inode usage
+  │   ├── disk/         Mountpoints & inode usage
+  │   ├── dmesg/        Kernel log streaming from /dev/kmsg
+  │   ├── docker/       Container stats & env inspect via Docker SDK
+  │   ├── firewall/     Active iptables/nftables rule parser
+  │   ├── initsys/      Init system autodetector (Systemd/SysV/OpenRC/Docker)
   │   ├── io/           Disk I/O rates from /proc/diskstats
-  │   ├── network/      Interface traffic from /proc/net/dev
-  │   ├── netstats/     TCP/UDP/ICMP errors from /proc/net/snmp
-  │   ├── routing/      Routes + ARP from /proc/net/route
-  │   ├── process/      Process list from /proc/<pid>/
-  │   ├── ports/        Listeners + connections from /proc/net/tcp
-  │   ├── docker/       Container stats via Docker SDK
-  │   ├── systemd/      Unit states via D-Bus socket
-  │   └── dmesg/        Kernel log from /dev/kmsg
+  │   ├── memory/       RAM breakdown from /proc/meminfo
+  │   ├── netstats/     TCP/UDP/ICMP error rates from /proc/net/snmp
+  │   ├── network/      Network interface traffic from /proc/net/dev
+  │   ├── packages/     Package manager stats (pacman/apt/dnf/apk/snap/flatpak)
+  │   ├── ports/        Socket listeners & connections from /proc/net/tcp
+  │   ├── process/      Process tree & detailed stats from /proc/<pid>/
+  │   ├── routing/      Routes & ARP table from /proc/net/route
+  │   ├── swap/         Swap memory stats from /proc/meminfo
+  │   ├── sysinfo/      Kernel, uptime, OS release, load averages
+  │   ├── systemd/      Unit states & unit logs via D-Bus
+  │   ├── thermal/      Hardware thermal sensors from /sys/class/thermal
+  │   └── users/        Local user accounts, system groups, sudoers rules
   └── ui/           → Bubbletea TUI
-      ├── styles/       Shared color palette + lipgloss styles
-      ├── app.go        Root model, tab routing, status bar
-      └── tabs/         5 tab models (dashboard, process, network, docker, services)
+      ├── styles/       Design system tokens, lipgloss styles & sparklines
+      ├── app.go        Root model, tab routing, status bar & scrollable help modal
+      └── tabs/         10 TUI tab models
 ```
 
-## 5 Tabs
+---
 
-### Tab 1 — Dashboard
-System overview: hostname, uptime, CPU bars with per-core %, memory/swap usage, disk + I/O, network interfaces with traffic rates, temperature readings.
+## 10 Dashboard Tabs
 
-**Drag-and-Drop Flexible Layout**: The Dashboard supports a fully dynamic layout manager! If your terminal supports mouse events, you can **click and drag** any panel to rearrange the grid.
-- Drop on the **left/right** of a panel to place it **beside** it (horizontally).
-- Drop on the **top/bottom** of a panel to place it **above/below** it.
-- Panels automatically and flexibly align their width depending on how many components share a row!
+### [1] Dashboard
+Overview panel displaying hostname, uptime, kernel release, per-core CPU bars, memory/swap gauges, disk I/O rates, network traffic, and thermal sensors.
+- **Drag-and-Drop Layout**: Click and drag any panel header to rearrange panels dynamically.
 
-### Tab 2 — Processes
-Interactive process table with **sort** (PID/CPU/Memory/Name), **filter** by name/user, **detail panel** (full command, FDs, cgroup), and **kill** support (SIGTERM with confirm, SIGKILL with PID re-type). Features a **smart scrolling viewport** that tracks your cursor seamlessly. Kill is only available when running as root or with `CAP_KILL`.
+### [2] Processes
+Process manager supporting **Tree View** (`t`), **Sort** (`s`/`F6`) by CPU/Memory/IO/PID, **Reverse Sort** (`r`), **Search Filter** (`/`), and **Process Signal Menu** (`k`/`F9`, `K`).
 
-### Tab 3 — Network
-Five sub-panels: **Interfaces** (traffic rates), **Listeners** (open ports with service names like "22/tcp → ssh (Secure Shell)"), **Connections** (active TCP with state), **Routing** (route table + ARP cache), **Statistics** (retransmits, errors, drops). Listeners and Connections lists feature smooth **viewport scrolling**.
+### [3] Network
+Sub-panels for **Interfaces** (bandwidth rates), **Listeners** (open ports mapped to service names like `22/tcp → ssh`), **Active Connections**, **Routing Table & ARP Cache**, and **Network Errors** (`/proc/net/snmp`).
 
-### Tab 4 — Docker
-Container table with CPU%, memory, status. **Detail panel** shows environment variables (sensitive values like `PASSWORD` are `[REDACTED]`), volume mounts, network info, port mappings. **Stop/Restart** with confirmation dialog. The detail panel includes **manual scrolling** for containers with extensive environments. Gracefully handles Docker being unavailable using the v28+ SDK.
+### [4] Docker
+Container monitoring showing CPU%, memory usage, status icons, volume mounts, network info, redacted env vars (`PASSWORD` $\rightarrow$ `[REDACTED]`), container logs (`l`), **Stop** (`s`), and **Restart** (`r`).
 
-### Tab 5 — Services
-**Systemd units** with filter (all/failed/running) and a **smart scrolling viewport**, **Kernel log** streaming with color-coded severity levels (emerg=red, warn=yellow, info=green) that automatically windows the latest logs to your terminal size.
+### [5] Services
+**Systemd Units** (filter all/failed/running, view unit logs `l`, start/stop/restart/enable/disable/mask) and streaming **Kernel dmesg logs** color-coded by severity.
+
+### [6] Terminal
+Embedded pseudoterminal shell. Press **`i`** or **`Enter`** to focus input mode and interact with `bash`, `zsh`, `starship`, `htop`, `vim`, or `tmux`. Press **`Esc Esc`** to return to navigation mode and scroll through past output.
+
+### [7] Firewall
+Active **iptables** / **nftables** rule viewer, rule deletion (`d`), toggle enable/disable (`e`), and interactive **Add Rule Wizard** (`a`) for quick port/protocol blocking.
+
+### [8] Packages
+Installed packages viewer across `pacman`, `apt`/`dpkg`, `dnf`/`rpm`, `apk`, `snap`, and `flatpak`. Supports repository package search (`/`), installation (`Enter`), removal (`r`), and system upgrade wizard (`u`).
+
+### [9] Users
+User security auditing: local user accounts, system groups, sudoers rules, system user toggle (`h`), user creation wizard (`a`), and account deletion (`d`).
+
+### [0] Advanced
+Active **SSH login sessions** (with session termination `k`), systemd timers & cron jobs, and **Storage Topology** (NVMe/SATA/ZFS/LVM).
+
+---
 
 ## Keyboard Shortcuts
 
-| Key         | Context     | Action                        |
-|-------------|-------------|-------------------------------|
-| `Mouse Drag`| Dashboard   | Rearrange panels dynamically  |
-| `q`/`Ctrl+C` | Global    | Quit                          |
-| `1`–`5`    | Global      | Switch tab                    |
-| `?`        | Global      | Toggle help overlay           |
-| `↑`/`↓`   | Tables      | Navigate rows / scroll        |
-| `PgUp`/`PgDn`| Scrollable| Fast scroll up/down           |
-| `Home`     | Scrollable  | Reset scroll to top           |
-| `j`        | Tables      | Navigate down                 |
-| `/`        | Tables      | Start filter                  |
-| `ESC`      | Any         | Cancel filter / close detail  |
-| `s`        | Process     | Cycle sort column             |
-| `r`        | Process     | Reverse sort order            |
-| `Enter`    | Process     | Toggle detail panel           |
-| `k`        | Process†    | Send SIGTERM (with confirm)   |
-| `K`        | Process†    | Send SIGKILL (type PID)       |
-| `Tab`      | Network     | Cycle sub-panels              |
-| `Enter`    | Docker      | Container detail              |
-| `s`        | Docker†     | Stop container (confirm)      |
-| `r`        | Docker†     | Restart container (confirm)   |
-| `Tab`      | Services    | Switch services/dmesg         |
-| `a`/`f`/`r` | Services  | Show all/failed/running       |
+| Key | Context | Action |
+| :--- | :--- | :--- |
+| **`q`** / **`Ctrl+C`** | Global | Quit application |
+| **`1`** – **`9`**, **`0`** | Global | Switch between 10 tabs |
+| **`?`** | Global | Open scrollable keyboard shortcuts guide |
+| **`↑`** / **`↓`** | Tables / Help | Navigate rows / scroll view |
+| **`PgUp`** / **`PgDn`** | Scrollable | Fast scroll up/down |
+| **`Home`** / **`End`** | Scrollable | Jump to top / bottom |
+| **`Tab`** | Sub-panels | Cycle sub-panel views |
+| **`/`** | Tables | Filter items by text query |
+| **`ESC`** | Any | Clear filter / close modal |
+| **`i`** / **`Enter`** | Terminal | Focus shell input mode |
+| **`Esc Esc`** | Terminal | Exit focus mode to navigation mode |
+| **`t`** | Process | Toggle Tree view vs Flat list |
+| **`s`** | Process | Cycle sort column |
+| **`r`** | Process | Reverse sort order |
+| **`k`** | Process / SSH† | Terminate process or active SSH session |
+| **`l`** | Docker / Services | Tail container or unit logs |
+| **`a`** | Firewall / Users | Launch Add Rule or Add User wizard |
 
-†Requires root or `CAP_KILL`
+†*Requires root or `CAP_KILL` capability*
+
+---
 
 ## Configuration
 
-BlackEye reads from `~/.config/blackeye/config.toml`. If the file doesn't exist, sensible defaults are used.
+BlackEye reads from `~/.config/blackeye/config.toml` (or custom path via `BLACKEYE_CONFIG` environment variable):
 
 ```toml
 [refresh]
@@ -142,15 +186,15 @@ systemd_interval   = 5
 dmesg_streaming    = true
 
 [alerts]
-cpu_warning    = 70.0   # % → yellow
-cpu_critical   = 85.0   # % → red
+cpu_warning    = 70.0   # % → yellow warning
+cpu_critical   = 85.0   # % → red alert
 memory_warning = 70.0
 disk_warning   = 80.0
 temp_warning   = 70.0   # °C
 temp_critical  = 85.0
 
 [ports]
-trusted_ports = [22, 80, 443, 5432]  # ports NOT flagged as suspicious
+trusted_ports = [22, 80, 443, 5432, 8080]
 
 [docker]
 socket = "/var/run/docker.sock"
@@ -159,69 +203,44 @@ socket = "/var/run/docker.sock"
 log_path = "~/.local/share/blackeye/audit.log"
 ```
 
-Override the config path:
-```bash
-BLACKEYE_CONFIG=/etc/blackeye.toml ./blackeye
+---
+
+## Security & Audit Logging
+
+- **No Unsafe Execution**: Data is parsed directly from `/proc`, `/sys`, D-Bus, and Unix sockets without executing arbitrary shell scripts.
+- **Input Validation**: Filter inputs restricted to safe characters (`[a-zA-Z0-9._-]`).
+- **TOCTOU Protection**: Target process names are re-verified prior to issuing signals.
+- **Privilege Checking**: Destructive actions are hidden or locked when running unprivileged.
+- **Append-Only Audit Log**: All administrative actions (killing processes, stopping containers, firewall modifications) are logged to `~/.local/share/blackeye/audit.log`:
+
+```text
+[2026-07-24T14:32:01+03:00] uid=0 user=root action=kill_process target=nginx pid=1234 result=success
+[2026-07-24T14:35:12+03:00] uid=0 user=root action=stop_container target=redis id=abc123def456 result=requested
 ```
 
-## Human-Friendly Naming
+---
 
-BlackEye resolves raw system identifiers to readable labels:
-
-| Raw Identifier | Displayed As                    |
-|---------------|---------------------------------|
-| Port 22       | `ssh (Secure Shell)`            |
-| Port 3306     | `mysql (MySQL Database)`        |
-| `eth0`        | `eth0 (Ethernet)`               |
-| `wlan0`       | `wlan0 (WiFi)`                  |
-| Process `S`   | `S (Sleeping)`                  |
-| Process `Z`   | `Z (Zombie — orphaned)`         |
-| TCP `01`      | `ESTABLISHED (Connected)`       |
-| Container     | `running (Active)` with 🟢 icon |
-| Mount `/`     | `/ (Root Filesystem)`           |
-
-## Security
-
-- **No `os/exec`** — all data comes from `/proc`, `/sys`, and sockets
-- **Input validation** — filter inputs restricted to `[a-zA-Z0-9._-]`
-- **TOCTOU protection** — process name is re-verified before sending signals
-- **Privilege awareness** — kill/stop buttons hidden without `CAP_KILL`
-- **Audit logging** — all destructive actions logged to append-only file
-- **Docker secrets** — env vars containing `PASSWORD`, `TOKEN`, etc. are `[REDACTED]`
-
-## Audit Log
-
-All destructive actions (kill process, stop/restart container) are logged:
-```
-[2026-07-08T14:32:01+03:00] uid=0 user=root action=kill_process target=nginx pid=1234 result=success
-[2026-07-08T14:35:12+03:00] uid=0 user=root action=stop_container target=redis id=abc123def456 result=requested
-```
-
-The log is **append-only** and located at `~/.local/share/blackeye/audit.log`.
-
-## Building from Source
+## Building & Testing
 
 ```bash
-# Clone
+# Clone repository
 git clone <repo-url> && cd BlackEye
 
-# Install dependencies
-go mod tidy
-go mod vendor
+# Build binary
+make
 
-# Build
-go build -trimpath -o blackeye .
+# Run tests across all 26 packages
+make test
 
-# Run tests
-go test ./internal/... -coverprofile=coverage.out -covermode=atomic
+# Rebuild from scratch
+make re
 
-# Or use the Makefile
-make        # build
-make run    # build + run
-make test   # run tests with coverage
-make clean  # remove artifacts
+# Clean build artifacts
+make clean
 ```
+
+---
 
 ## License
 
-This project is licensed under the **MIT License**. See the `LICENSE` file for details.
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
