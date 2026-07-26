@@ -125,6 +125,42 @@ func (s *Service) RestartContainer(ctx context.Context, id string) error {
 	return cli.ContainerRestart(ctx, id, container.StopOptions{Timeout: &timeout})
 }
 
+// StartContainer starts a stopped container by ID.
+func (s *Service) StartContainer(ctx context.Context, id string) error {
+	cli := s.client()
+	if cli == nil {
+		return fmt.Errorf("docker: not connected")
+	}
+	return cli.ContainerStart(ctx, id, container.StartOptions{})
+}
+
+// PauseContainer pauses a running container by ID.
+func (s *Service) PauseContainer(ctx context.Context, id string) error {
+	cli := s.client()
+	if cli == nil {
+		return fmt.Errorf("docker: not connected")
+	}
+	return cli.ContainerPause(ctx, id)
+}
+
+// UnpauseContainer unpauses a paused container by ID.
+func (s *Service) UnpauseContainer(ctx context.Context, id string) error {
+	cli := s.client()
+	if cli == nil {
+		return fmt.Errorf("docker: not connected")
+	}
+	return cli.ContainerUnpause(ctx, id)
+}
+
+// RemoveContainer removes a container by ID.
+func (s *Service) RemoveContainer(ctx context.Context, id string, force bool) error {
+	cli := s.client()
+	if cli == nil {
+		return fmt.Errorf("docker: not connected")
+	}
+	return cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: force})
+}
+
 // ContainerLogs returns the tail of stdout/stderr for a container.
 func (s *Service) ContainerLogs(ctx context.Context, id string, tail int) (string, error) {
 	cli := s.client()

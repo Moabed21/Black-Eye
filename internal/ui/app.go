@@ -288,6 +288,18 @@ func (m *Model) View() string {
 	content := m.tabs[m.activeTab].View()
 	statusBar := m.renderStatusBar()
 
+	// Clamp content height so total lines never exceed m.height
+	tabH := lipgloss.Height(tabBar)
+	statusH := lipgloss.Height(statusBar)
+	availH := m.height - tabH - statusH
+	if availH > 0 {
+		lines := strings.Split(content, "\n")
+		if len(lines) > availH {
+			lines = lines[:availH]
+			content = strings.Join(lines, "\n")
+		}
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, tabBar, content, statusBar)
 }
 
@@ -385,9 +397,12 @@ func (m *Model) renderHelp() string {
 		"  Enter        View container details & stats\n" +
 		"  l            Tail container logs\n" +
 		(func() string {
-			if privilege.CanKill() {
-				return "  s            Stop container (confirmation required)\n" +
-					"  r            Restart container (confirmation required)\n"
+			if privilege.HasDockerAccess() {
+				return "  a            Start stopped container (confirmation required)\n" +
+					"  s            Stop container (confirmation required)\n" +
+					"  r            Restart container (confirmation required)\n" +
+					"  p            Pause / Unpause container\n" +
+					"  d            Remove container (force, confirmation required)\n"
 			}
 			return ""
 		})() +
@@ -419,15 +434,19 @@ func (m *Model) renderHelp() string {
 		"  ↑/↓ / PgUp   Scroll output scrollback (when unfocused)\n\n" +
 		styles.TextBold.Render("Firewall Tab (7)\n") +
 		"  Tab          Switch sub-panels (Active Rules, Quick Actions)\n" +
+		"  b            Switch active firewall engine (ufw / firewalld / iptables / nftables)\n" +
 		"  a            Launch Add Rule Wizard (port, action, protocol)\n" +
 		"  d            Delete highlighted rule (confirmation required)\n" +
 		"  e            Toggle Firewall enable/disable\n\n" +
 		styles.TextBold.Render("Packages Tab (8)\n") +
 		"  Tab          Switch sub-panels (Installed Packages, Search & Install, Pending Updates)\n" +
 		"  /            Filter installed packages OR enter repo search query\n" +
+		"  c            Cycle category filter (System Core, User Apps, Libraries, Dev)\n" +
+		"  b            Switch package manager / helper (pacman, yay, flatpak, snap, apt, etc.)\n" +
 		"  Enter        Install highlighted package (in Search sub-panel)\n" +
 		"  r            Remove highlighted package (in Installed sub-panel)\n" +
-		"  u            Run full system package upgrade (requires typed confirmation)\n\n" +
+		"  u            Run full system package upgrade (requires typed confirmation)\n" +
+		"  ESC          Dismiss execution log output modal\n\n" +
 		styles.TextBold.Render("Users Tab (9)\n") +
 		"  Tab          Switch sub-panels (User Accounts, System Groups, Sudoers Rules)\n" +
 		"  h            Toggle hiding system users (UID < 1000)\n" +

@@ -554,11 +554,15 @@ func (t *Terminal) View() string {
 		visible = append(visible, "")
 	}
 
-	// Join and add a cursor block if focused and at bottom.
-	content := strings.Join(visible, "\n")
-	if t.focused && t.scrollOffset == 0 {
-		// No visual cursor needed — the shell manages it via ANSI.
+	// Join and add a visual block cursor if focused and at bottom.
+	if t.focused && t.scrollOffset == 0 && len(visible) > 0 {
+		activeIdx := len(visible) - 1
+		for activeIdx > 0 && visible[activeIdx] == "" {
+			activeIdx--
+		}
+		visible[activeIdx] = overwriteAtCol(visible[activeIdx], t.col, '█')
 	}
+	content := strings.Join(visible, "\n")
 
 	scrollInfo := ""
 	if t.scrollOffset > 0 {
@@ -618,6 +622,10 @@ func startPTY(cmd *exec.Cmd) (*os.File, error) {
 		ptmx.Close()
 		return nil, fmt.Errorf("start shell: %w", err)
 	}
+
+	// Set slave PTY foreground process group to the child shell PID
+	// to prevent SIGTTOU / SIGTTIN suspensions when running under sudo.
+	_ = unix.IoctlSetPointerInt(int(pts.Fd()), unix.TIOCSPGRP, cmd.Process.Pid)
 
 	pts.Close() // Parent doesn't need the slave side.
 	return ptmx, nil

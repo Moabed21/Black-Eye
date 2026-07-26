@@ -4,6 +4,7 @@ package firewall
 
 import (
 	"context"
+	"os/exec"
 	"time"
 
 	"blackeye/internal/config"
@@ -89,6 +90,37 @@ func (s *Service) Stop() {
 func (s *Service) Reload(cfg config.Config) {}
 
 func (s *Service) Backend() FirewallBackend { return s.backend }
+
+// AvailableFirewallBackends dynamically scans system kernel modules, active services, and binary paths.
+func AvailableFirewallBackends() []FirewallBackend {
+	var backends []FirewallBackend
+	seen := make(map[string]bool)
+
+	engines := []struct {
+		bin  string
+		ctor func(path string) FirewallBackend
+	}{
+		{"ufw", func(p string) FirewallBackend { return NewUFW(p) }},
+		{"firewall-cmd", func(p string) FirewallBackend { return NewFirewalld() }},
+		{"nft", func(p string) FirewallBackend { return NewNFTables(p) }},
+		{"iptables", func(p string) FirewallBackend { return NewIPTables(p) }},
+	}
+
+	for _, e := range engines {
+		if path, err := exec.LookPath(e.bin); err == nil {
+			b := e.ctor(path)
+			if !seen[b.Name()] {
+				seen[b.Name()] = true
+				backends = append(backends, b)
+			}
+		}
+	}
+
+	if len(backends) == 0 {
+		backends = append(backends, NewNFTables(""))
+	}
+	return backends
+}
 
 func (s *Service) Start(ctx context.Context) error {
 	ctx, s.cancel = context.WithCancel(ctx)

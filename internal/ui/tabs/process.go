@@ -447,7 +447,7 @@ func (p *Process) renderTable() string {
 	}
 
 	// Viewport windowing based on cursor.
-	viewHeight := p.height - 10
+	viewHeight := p.height - 13
 	if viewHeight > 0 && len(rows) > viewHeight {
 		startIdx := p.cursor - viewHeight/2
 		if startIdx < 0 {

@@ -161,6 +161,24 @@ func (d *Docker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if privilege.HasDockerAccess() {
 			d.startAction(1)
 		}
+	case "a":
+		if privilege.HasDockerAccess() {
+			d.startAction(3)
+		}
+	case "p":
+		if privilege.HasDockerAccess() {
+			if d.snap != nil && d.cursor < len(d.snap.Containers) {
+				if strings.Contains(d.snap.Containers[d.cursor].DisplayStatus, "paused") {
+					d.startAction(5) // unpause
+				} else {
+					d.startAction(4) // pause
+				}
+			}
+		}
+	case "d":
+		if privilege.HasDockerAccess() {
+			d.startAction(6)
+		}
 	}
 	return d, nil
 }
@@ -179,8 +197,17 @@ func (d *Docker) doActionCmd(mode int) tea.Cmd {
 	}
 	c := d.snap.Containers[d.cursor]
 	action := "stop_container"
-	if mode == 2 {
+	switch mode {
+	case 2:
 		action = "restart_container"
+	case 3:
+		action = "start_container"
+	case 4:
+		action = "pause_container"
+	case 5:
+		action = "unpause_container"
+	case 6:
+		action = "remove_container"
 	}
 	id := c.FullID
 
@@ -194,6 +221,14 @@ func (d *Docker) doActionCmd(mode int) tea.Cmd {
 			err = d.dockerSvc.StopContainer(ctx, id)
 		case 2:
 			err = d.dockerSvc.RestartContainer(ctx, id)
+		case 3:
+			err = d.dockerSvc.StartContainer(ctx, id)
+		case 4:
+			err = d.dockerSvc.PauseContainer(ctx, id)
+		case 5:
+			err = d.dockerSvc.UnpauseContainer(ctx, id)
+		case 6:
+			err = d.dockerSvc.RemoveContainer(ctx, id, true)
 		}
 
 		result := "success"
@@ -296,10 +331,19 @@ func (d *Docker) renderTable() string {
 	}
 
 	actionDialog := ""
-	if d.actionMode == 1 {
+	switch d.actionMode {
+	case 1:
 		actionDialog = "\n\n  " + styles.TextYellow.Render("Stop container? [y/N]")
-	} else if d.actionMode == 2 {
+	case 2:
 		actionDialog = "\n\n  " + styles.TextYellow.Render("Restart container? [y/N]")
+	case 3:
+		actionDialog = "\n\n  " + styles.TextGreen.Render("Start container? [y/N]")
+	case 4:
+		actionDialog = "\n\n  " + styles.TextYellow.Render("Pause container? [y/N]")
+	case 5:
+		actionDialog = "\n\n  " + styles.TextGreen.Render("Unpause container? [y/N]")
+	case 6:
+		actionDialog = "\n\n  " + styles.TextRed.Render("Remove container (force)? [y/N]")
 	}
 
 	statusLine := ""

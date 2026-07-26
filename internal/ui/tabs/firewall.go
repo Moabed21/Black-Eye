@@ -54,12 +54,18 @@ type Firewall struct {
 
 	// Delete rule confirmation state
 	delMode int // 0=none, 1=confirm delete
+
+	// Firewall backends (b key)
+	backends         []firewall.FirewallBackend
+	activeBackendIdx int
 }
 
 func NewFirewall(b *bus.Bus, cfg config.Config) *Firewall {
+	backends := firewall.AvailableFirewallBackends()
 	return &Firewall{
 		cfg:       cfg,
 		sub:       b.Subscribe("firewall"),
+		backends:  backends,
 		addAction: "ACCEPT",
 		addProto:  "tcp",
 	}
@@ -171,6 +177,21 @@ func (f *Firewall) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "down", "j":
 		f.cursor++
+	case "b":
+		if len(f.backends) > 0 {
+			f.activeBackendIdx = (f.activeBackendIdx + 1) % len(f.backends)
+			f.cursor = 0
+			if b := f.getActiveBackend(); b != nil {
+				rules, _ := b.ListRules()
+				enabled, _ := b.IsEnabled()
+				f.snap = &firewall.Snapshot{
+					BackendName: b.Name(),
+					IsEnabled:   enabled,
+					Rules:       rules,
+					Available:   true,
+				}
+			}
+		}
 	case "a":
 		if privilege.CanFirewall() {
 			f.addMode = true
@@ -192,9 +213,20 @@ func (f *Firewall) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return f, nil
 }
 
+func (f *Firewall) getActiveBackend() firewall.FirewallBackend {
+	if len(f.backends) > 0 && f.activeBackendIdx < len(f.backends) {
+		return f.backends[f.activeBackendIdx]
+	}
+	if f.fwSvc != nil {
+		return f.fwSvc.Backend()
+	}
+	return nil
+}
+
 func (f *Firewall) doAddRule(port, action, proto string) tea.Cmd {
 	return func() tea.Msg {
-		if f.fwSvc == nil || f.fwSvc.Backend() == nil {
+		backend := f.getActiveBackend()
+		if backend == nil {
 			return fwActionMsg{action: "add rule", err: fmt.Errorf("firewall backend unavailable")}
 		}
 		r := firewall.Rule{
@@ -203,7 +235,7 @@ func (f *Firewall) doAddRule(port, action, proto string) tea.Cmd {
 			Protocol: proto,
 			Port:     port,
 		}
-		err := f.fwSvc.Backend().AddRule(r)
+		err := backend.AddRule(r)
 		result := "success"
 		if err != nil {
 			result = "error: " + err.Error()
@@ -220,10 +252,11 @@ func (f *Firewall) doAddRule(port, action, proto string) tea.Cmd {
 
 func (f *Firewall) doDeleteRule(id string) tea.Cmd {
 	return func() tea.Msg {
-		if f.fwSvc == nil || f.fwSvc.Backend() == nil {
+		backend := f.getActiveBackend()
+		if backend == nil {
 			return fwActionMsg{action: "delete rule", err: fmt.Errorf("firewall backend unavailable")}
 		}
-		err := f.fwSvc.Backend().DeleteRule(id)
+		err := backend.DeleteRule(id)
 		result := "success"
 		if err != nil {
 			result = "error: " + err.Error()
@@ -240,19 +273,30 @@ func (f *Firewall) doDeleteRule(id string) tea.Cmd {
 
 func (f *Firewall) toggleFirewall() tea.Cmd {
 	return func() tea.Msg {
-		if f.fwSvc == nil || f.fwSvc.Backend() == nil {
+		backend := f.getActiveBackend()
+		if backend == nil {
 			return fwActionMsg{action: "toggle firewall", err: fmt.Errorf("firewall backend unavailable")}
 		}
-		enabled, _ := f.fwSvc.Backend().IsEnabled()
+		enabled, _ := backend.IsEnabled()
 		var err error
-		act := "enable"
+		action := "enable firewall"
 		if enabled {
-			act = "disable"
-			err = f.fwSvc.Backend().Disable()
+			action = "disable firewall"
+			err = backend.Disable()
 		} else {
-			err = f.fwSvc.Backend().Enable()
+			err = backend.Enable()
 		}
-		return fwActionMsg{action: act + " firewall", err: err}
+		result := "success"
+		if err != nil {
+			result = "error: " + err.Error()
+		}
+		if f.auditSvc != nil {
+			f.auditSvc.WriteEvent(audit.Event{
+				UID: os.Geteuid(), User: resolver.ByUID(os.Geteuid()),
+				Action: "firewall_toggle", Target: action, Result: result,
+			})
+		}
+		return fwActionMsg{action: action, err: err}
 	}
 }
 
@@ -296,15 +340,24 @@ func (f *Firewall) viewRules() string {
 		}
 	}
 
+	engineBar := "  Active Engine [b]: "
+	for i, b := range f.backends {
+		if i == f.activeBackendIdx {
+			engineBar += styles.TextAccent.Render("[" + b.Name() + "] ")
+		} else {
+			engineBar += styles.TextMuted.Render(b.Name() + "  ")
+		}
+	}
+
 	title := styles.PanelTitleStyle.Render(fmt.Sprintf("  Firewall: %s  │  Status: %s", backendName, statusStr))
 
 	if f.snap == nil {
-		return title + "\n  Loading firewall rules…"
+		return title + "\n" + engineBar + "\n  Loading firewall rules…"
 	}
 
 	rules := f.filteredRules()
 
-	actionLine := "  Keys: [a]dd rule  [d]elete rule  [e]nable/disable toggle"
+	actionLine := "  Keys: [b] switch engine  [a]dd rule  [d]elete rule  [e]nable/disable toggle"
 	if !privilege.CanFirewall() {
 		actionLine = styles.TextMuted.Render("  (Read-only mode — CAP_NET_ADMIN or root required to edit rules)")
 	}
@@ -360,7 +413,7 @@ func (f *Firewall) viewRules() string {
 		statusLine = "\n  " + f.statusMsg
 	}
 
-	return strings.Join([]string{title, actionLine, header, strings.Join(rows, "\n"), wizard, delDialog, statusLine}, "\n")
+	return strings.Join([]string{title, engineBar, actionLine, header, strings.Join(rows, "\n"), wizard, delDialog, statusLine}, "\n")
 }
 
 func (f *Firewall) viewQuick() string {

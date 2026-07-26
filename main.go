@@ -147,6 +147,7 @@ func main() {
 		procTab.SetAudit(audit)
 	}
 	if dockerTab, ok := root.GetTab(ui.TabDocker).(*uitabs.Docker); ok {
+		dockerTab.SetDocker(docker)
 		dockerTab.SetAudit(audit)
 	}
 	if servicesTab, ok := root.GetTab(ui.TabServices).(*uitabs.Services); ok {
