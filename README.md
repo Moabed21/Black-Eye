@@ -1,11 +1,11 @@
-# BlackEye v1.2.1 — Linux System Administration Dashboard
+# BlackEye v1.2.2 — Linux System Administration Dashboard
 
-![Version](https://img.shields.io/badge/version-1.2.1-gold.svg)
+![Version](https://img.shields.io/badge/version-1.2.2-gold.svg)
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Go Version](https://img.shields.io/badge/go-%E2%89%A51.21-00ADD8.svg)
 
-A real-time, high-performance TUI (Terminal User Interface) system monitor and administration dashboard built in Go. BlackEye reads directly from Linux kernel virtual filesystems (`/proc`, `/sys`), D-Bus, and system sockets with zero external binary dependencies.
+A real-time, high-performance TUI (Terminal User Interface) system monitor and administration dashboard built in Go. BlackEye reads directly from Linux kernel virtual filesystems (`/proc`, `/sys`), D-Bus, system sockets, and native system APIs with zero external binary dependencies.
 
 ```
 ┌─[1] Dashboard─[2] Processes─[3] Network─[4] Docker─[5] Services─[6] Terminal─[7] Firewall─[8] Packages─[9] Users─[0] Advanced─┐
@@ -21,20 +21,22 @@ A real-time, high-performance TUI (Terminal User Interface) system monitor and a
 │  RAM:  5.2 GiB / 15.6 GiB  ████████████░░░░░░░░░░░░  33%                                                                     │
 │  Swap: 0.1 GiB /  4.0 GiB  █░░░░░░░░░░░░░░░░░░░░░░░   3%                                                                    │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-  BlackEye v1.2.1  │  ● normal                                                                      q quit  │  ? help  │  1–9,0 tabs
+  BlackEye v1.2.2  │  ● normal                                                                      q quit  │  ? help  │  1–9,0 tabs
 ```
 
 **Theme:** Premium **Navy Blue & Gold** color palette with dynamic highlighting, alert toasts (⚠/🔴), and drag-and-drop panel header positioning.
 
 ---
 
-## What's New in v1.2.1
+## What's New in v1.2.2
 
-- **Embedded PTY Terminal Engine (Tab 6)**: Built-in pseudoterminal shell launcher with a column-based cursor engine supporting Starship, Zsh, Bash, Htop, Vim, ANSI 256/TrueColor, and OSC title sequence filtering.
-- **Expanded 10-Tab Dashboard Suite**: Added dedicated tabs for **Firewall** management, **Package Manager** operations, **User Security & Sudoers Audit**, and **Advanced Storage Topology & SSH Sessions**.
-- **22 Independent Microservices**: Expanded backend collectors with zero-allocation line parsers for low heap overhead and low CPU consumption.
-- **Scrollable Help Overlay (`?`)**: Full viewport scrolling (`↑`/`↓`/`PgUp`/`PgDn`) for the interactive shortcuts guide.
-- **Comprehensive Unit Test Suite**: 26 unit test packages covering lifecycles, health statuses, and edge cases.
+- **Smart Dynamic System Auto-Discovery**: Automatic `$PATH` binary scanning and kernel/service inspection for all installed package managers (`pacman`, `yay`, `paru`, `apt`, `dnf`, `yum`, `apk`, `zypper`, `flatpak`, `snap`) and firewall engines (`ufw`, `firewalld`, `iptables`, `nftables`).
+- **Live Docker Container Operations (Tab 4)**: Full container lifecycle management (**Start**, **Stop**, **Restart**, **Pause/Unpause**, **Remove**, **Logs**) with interactive confirmation dialogs and security audit logging.
+- **Firewall Engine Switcher (Tab 7)**: Live engine switcher (**`b`** key) allowing seamless toggling between detected firewall engines (`ufw`, `firewalld`, `iptables`, `nftables`).
+- **Package Category Filtering & System Core Safety (Tab 8)**: Categorize packages by `🛡️ System Core`, `👤 User App`, `📦 Library`, and `🛠️ Dev` (**`c`** key), featuring prominent red **System Core removal warning banners** to prevent breaking the operating system.
+- **AUR & Multi-Manager Integration (Tab 8)**: `yay` / AUR helper support with clean ANSI escape sequence stripping, fuzzy package suggestions, and real-time operation stdout/stderr log modals.
+- **App Shell Tab Bar Protection**: Mathematical viewport height clamping in `app.go`, guaranteeing that the top dashboard tab bar remains visible across all tabs and terminal dimensions.
+- **Fully Aligned `?` Help Guide**: Interactive shortcuts guide overlay (`?`) updated with 100% of new keybindings.
 
 ---
 
@@ -47,7 +49,7 @@ make
 # 2. Run as normal user (read-only monitoring mode)
 ./blackeye
 
-# 3. Run with root privileges (enables process signals, firewall wizard, service controls)
+# 3. Run with root privileges (enables process signals, firewall rules, package & container controls)
 sudo ./blackeye
 
 # 4. Run full test suite with coverage report
@@ -63,7 +65,7 @@ make test
 | **Go** | ≥ 1.21 | Build & compile |
 | **Linux** | ≥ 4.x | Kernel `/proc` & `/sys` interfaces |
 | **Terminal** | ≥ 80×24 | 256-color or TrueColor recommended |
-| **Docker** *(optional)* | Any | For Container Tab 4 |
+| **Docker** *(optional)* | Any | For Container Tab 4 operations |
 | **Systemd** *(optional)* | Any | For Services Tab 5 (auto-detects SysVinit/OpenRC) |
 
 ---
@@ -87,14 +89,14 @@ main.go
   │   ├── cpu/          Per-core CPU % from /proc/stat
   │   ├── disk/         Mountpoints & inode usage
   │   ├── dmesg/        Kernel log streaming from /dev/kmsg
-  │   ├── docker/       Container stats & env inspect via Docker SDK
-  │   ├── firewall/     Active iptables/nftables rule parser
+  │   ├── docker/       Live Container SDK (start, stop, restart, pause, remove, logs)
+  │   ├── firewall/     Smart auto-discovery engine (ufw, firewalld, iptables, nftables)
   │   ├── initsys/      Init system autodetector (Systemd/SysV/OpenRC/Docker)
   │   ├── io/           Disk I/O rates from /proc/diskstats
   │   ├── memory/       RAM breakdown from /proc/meminfo
   │   ├── netstats/     TCP/UDP/ICMP error rates from /proc/net/snmp
   │   ├── network/      Network interface traffic from /proc/net/dev
-  │   ├── packages/     Package manager stats (pacman/apt/dnf/apk/snap/flatpak)
+  │   ├── packages/     Smart package manager discovery (pacman, yay, apt, dnf, apk, etc.)
   │   ├── ports/        Socket listeners & connections from /proc/net/tcp
   │   ├── process/      Process tree & detailed stats from /proc/<pid>/
   │   ├── routing/      Routes & ARP table from /proc/net/route
@@ -105,7 +107,7 @@ main.go
   │   └── users/        Local user accounts, system groups, sudoers rules
   └── ui/           → Bubbletea TUI
       ├── styles/       Design system tokens, lipgloss styles & sparklines
-      ├── app.go        Root model, tab routing, status bar & scrollable help modal
+      ├── app.go        Root model, viewport height clamp & scrollable help modal
       └── tabs/         10 TUI tab models
 ```
 
@@ -124,7 +126,7 @@ Process manager supporting **Tree View** (`t`), **Sort** (`s`/`F6`) by CPU/Memor
 Sub-panels for **Interfaces** (bandwidth rates), **Listeners** (open ports mapped to service names like `22/tcp → ssh`), **Active Connections**, **Routing Table & ARP Cache**, and **Network Errors** (`/proc/net/snmp`).
 
 ### [4] Docker
-Container monitoring showing CPU%, memory usage, status icons, volume mounts, network info, redacted env vars (`PASSWORD` $\rightarrow$ `[REDACTED]`), container logs (`l`), **Stop** (`s`), and **Restart** (`r`).
+Container management showing CPU%, memory usage, status icons, volume mounts, redacted env vars, container logs (`l`), **Start** (`a`), **Stop** (`s`), **Restart** (`r`), **Pause/Unpause** (`p`), and **Remove** (`d`).
 
 ### [5] Services
 **Systemd Units** (filter all/failed/running, view unit logs `l`, start/stop/restart/enable/disable/mask) and streaming **Kernel dmesg logs** color-coded by severity.
@@ -133,10 +135,10 @@ Container monitoring showing CPU%, memory usage, status icons, volume mounts, ne
 Embedded pseudoterminal shell. Press **`i`** or **`Enter`** to focus input mode and interact with `bash`, `zsh`, `starship`, `htop`, `vim`, or `tmux`. Press **`Esc Esc`** to return to navigation mode and scroll through past output.
 
 ### [7] Firewall
-Active **iptables** / **nftables** rule viewer, rule deletion (`d`), toggle enable/disable (`e`), and interactive **Add Rule Wizard** (`a`) for quick port/protocol blocking.
+Active rule viewer for **ufw**, **firewalld**, **iptables**, and **nftables**. Supports live Engine Switcher (**`b`**), rule deletion (**`d`**), toggle enable/disable (**`e`**), and interactive **Add Rule Wizard** (**`a`**).
 
 ### [8] Packages
-Installed packages viewer across `pacman`, `apt`/`dpkg`, `dnf`/`rpm`, `apk`, `snap`, and `flatpak`. Supports repository package search (`/`), installation (`Enter`), removal (`r`), and system upgrade wizard (`u`).
+Cross-distro package management dynamically discovering `pacman`, `yay`, `paru`, `apt`, `dnf`, `apk`, `zypper`, `flatpak`, and `snap`. Supports Helper Switcher (**`b`**), Category Filtering (**`c`**), Fuzzy Suggestions, repo search (**`/`**), installation (**`Enter`**), removal (**`r`** with System Core safety warnings), and system upgrade wizard (**`u`**).
 
 ### [9] Users
 User security auditing: local user accounts, system groups, sudoers rules, system user toggle (`h`), user creation wizard (`a`), and account deletion (`d`).
@@ -155,18 +157,21 @@ Active **SSH login sessions** (with session termination `k`), systemd timers & c
 | **`?`** | Global | Open scrollable keyboard shortcuts guide |
 | **`↑`** / **`↓`** | Tables / Help | Navigate rows / scroll view |
 | **`PgUp`** / **`PgDn`** | Scrollable | Fast scroll up/down |
-| **`Home`** / **`End`** | Scrollable | Jump to top / bottom |
 | **`Tab`** | Sub-panels | Cycle sub-panel views |
+| **`b`** | Firewall / Packages | Switch active firewall engine or package helper |
+| **`c`** | Packages | Cycle category filter (System Core, User App, Library, Dev) |
 | **`/`** | Tables | Filter items by text query |
-| **`ESC`** | Any | Clear filter / close modal |
+| **`ESC`** | Any | Clear filter / close modal dialog |
 | **`i`** / **`Enter`** | Terminal | Focus shell input mode |
 | **`Esc Esc`** | Terminal | Exit focus mode to navigation mode |
 | **`t`** | Process | Toggle Tree view vs Flat list |
-| **`s`** | Process | Cycle sort column |
-| **`r`** | Process | Reverse sort order |
+| **`s`** | Process / Docker | Cycle sort column or Stop container |
+| **`r`** | Process / Docker | Reverse sort order or Restart container |
+| **`a`** | Docker / Firewall / Users | Start container, launch Add Rule wizard, or Add User |
+| **`p`** | Docker | Pause / Unpause container |
+| **`d`** | Docker / Firewall / Users | Remove container, delete rule, or delete user |
 | **`k`** | Process / SSH† | Terminate process or active SSH session |
 | **`l`** | Docker / Services | Tail container or unit logs |
-| **`a`** | Firewall / Users | Launch Add Rule or Add User wizard |
 
 †*Requires root or `CAP_KILL` capability*
 
@@ -211,11 +216,12 @@ log_path = "~/.local/share/blackeye/audit.log"
 - **Input Validation**: Filter inputs restricted to safe characters (`[a-zA-Z0-9._-]`).
 - **TOCTOU Protection**: Target process names are re-verified prior to issuing signals.
 - **Privilege Checking**: Destructive actions are hidden or locked when running unprivileged.
-- **Append-Only Audit Log**: All administrative actions (killing processes, stopping containers, firewall modifications) are logged to `~/.local/share/blackeye/audit.log`:
+- **Append-Only Audit Log**: All administrative actions (killing processes, container operations, firewall modifications) are logged to `~/.local/share/blackeye/audit.log`:
 
 ```text
-[2026-07-24T14:32:01+03:00] uid=0 user=root action=kill_process target=nginx pid=1234 result=success
-[2026-07-24T14:35:12+03:00] uid=0 user=root action=stop_container target=redis id=abc123def456 result=requested
+[2026-07-26T14:32:01+03:00] uid=0 user=root action=kill_process target=nginx pid=1234 result=success
+[2026-07-26T14:35:12+03:00] uid=0 user=root action=stop_container target=redis id=abc123def456 result=requested
+[2026-07-26T14:40:05+03:00] uid=0 user=root action=package_install target=postman result=success
 ```
 
 ---
@@ -229,7 +235,7 @@ git clone <repo-url> && cd BlackEye
 # Build binary
 make
 
-# Run tests across all 26 packages
+# Run tests across all packages
 make test
 
 # Rebuild from scratch
