@@ -9,6 +9,7 @@ import (
 
 	"blackeye/internal/bus"
 	"blackeye/internal/config"
+	"blackeye/internal/resolver"
 	"blackeye/internal/services/network"
 	"blackeye/internal/services/netstats"
 	"blackeye/internal/services/ports"
@@ -193,8 +194,8 @@ func (n *Network) viewInterfaces() string {
 	}
 	var rows []string
 	rows = append(rows, styles.TableHeader.Render(
-		fmt.Sprintf("%-28s  %-12s  %-12s  %-10s  %-10s",
-			"Interface", "↓ Received", "↑ Sent", "RX Errors", "TX Errors"),
+		fmt.Sprintf("%-24s  %-13s  %-13s  %-14s  %-14s  %-8s",
+			"Interface", "↓ Recv Rate", "↑ Send Rate", "Total Recv", "Total Send", "Errors"),
 	))
 	for _, iface := range n.netSnap.Ifaces {
 		if n.filter != "" && !strings.Contains(strings.ToLower(iface.DisplayName), strings.ToLower(n.filter)) {
@@ -204,12 +205,20 @@ func (n *Network) viewInterfaces() string {
 		if iface.RxErrors > 0 || iface.TxErrors > 0 {
 			errStyle = styles.TextRed
 		}
-		rows = append(rows, fmt.Sprintf("%-28s  %-12s  %-12s  %-10s  %-10s",
-			styles.Truncate(iface.DisplayName, 28),
-			fmt.Sprintf("%.2f MB/s", iface.RxMBs),
-			fmt.Sprintf("%.2f MB/s", iface.TxMBs),
-			errStyle.Render(fmt.Sprintf("%d", iface.RxErrors)),
-			errStyle.Render(fmt.Sprintf("%d", iface.TxErrors)),
+		errStr := fmt.Sprintf("%d/%d", iface.RxErrors, iface.TxErrors)
+
+		rxRateStr := resolver.FormatRate(iface.RxBps)
+		txRateStr := resolver.FormatRate(iface.TxBps)
+		rxTotalStr := resolver.FormatBytes(iface.RxBytesTotal)
+		txTotalStr := resolver.FormatBytes(iface.TxBytesTotal)
+
+		rows = append(rows, fmt.Sprintf("%-24s  %-13s  %-13s  %-14s  %-14s  %-8s",
+			styles.Truncate(iface.DisplayName, 24),
+			rxRateStr,
+			txRateStr,
+			rxTotalStr,
+			txTotalStr,
+			errStyle.Render(errStr),
 		))
 	}
 	return title + "\n" + strings.Join(rows, "\n")

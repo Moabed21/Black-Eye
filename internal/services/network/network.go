@@ -19,12 +19,16 @@ import (
 
 // IfaceSnapshot holds one network interface reading.
 type IfaceSnapshot struct {
-	DisplayName string  // "eth0 (Ethernet)"
-	RawName     string  // "eth0"
-	RxMBs       float64 // MB/s received
-	TxMBs       float64 // MB/s transmitted
-	RxErrors    uint64
-	TxErrors    uint64
+	DisplayName  string  // "eth0 (Ethernet)"
+	RawName      string  // "eth0"
+	RxBps        float64 // Bytes/sec received
+	TxBps        float64 // Bytes/sec transmitted
+	RxBytesTotal uint64  // Total lifetime bytes received
+	TxBytesTotal uint64  // Total lifetime bytes transmitted
+	RxErrors     uint64
+	TxErrors     uint64
+	RxMBs        float64 // MB/s received (legacy compatibility)
+	TxMBs        float64 // MB/s transmitted (legacy compatibility)
 }
 
 // Snapshot is the published payload.
@@ -114,21 +118,28 @@ func (s *Service) collect() (Snapshot, error) {
 	var ifaces []IfaceSnapshot
 	for name, c := range curr {
 		p, hasPrev := prev[name]
-		var rxMBs, txMBs float64
+		var rxBps, txBps float64
 		if hasPrev {
 			elapsed := now.Sub(p.at).Seconds()
 			if elapsed > 0 {
-				rxMBs = float64(c.rxBytes-p.rxBytes) / elapsed / (1024 * 1024)
-				txMBs = float64(c.txBytes-p.txBytes) / elapsed / (1024 * 1024)
+				rxBps = float64(c.rxBytes-p.rxBytes) / elapsed
+				txBps = float64(c.txBytes-p.txBytes) / elapsed
 			}
 		}
+		rxMBs := rxBps / (1024 * 1024)
+		txMBs := txBps / (1024 * 1024)
+
 		ifaces = append(ifaces, IfaceSnapshot{
-			DisplayName: resolver.Iface(name),
-			RawName:     name,
-			RxMBs:       rxMBs,
-			TxMBs:       txMBs,
-			RxErrors:    c.rxErrors,
-			TxErrors:    c.txErrors,
+			DisplayName:  resolver.Iface(name),
+			RawName:      name,
+			RxBps:        rxBps,
+			TxBps:        txBps,
+			RxBytesTotal: c.rxBytes,
+			TxBytesTotal: c.txBytes,
+			RxMBs:        rxMBs,
+			TxMBs:        txMBs,
+			RxErrors:     c.rxErrors,
+			TxErrors:     c.txErrors,
 		})
 	}
 	return Snapshot{Ifaces: ifaces, Timestamp: now}, nil

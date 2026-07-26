@@ -627,8 +627,8 @@ func (d *Dashboard) renderNetwork(targetWidth, targetHeight int) string {
 		}
 		lines = append(lines, fmt.Sprintf("  %s  ↓ %s  ↑ %s%s",
 			styles.TextAccent.Render(iface.DisplayName),
-			resolver.FormatRate(iface.RxMBs*1024*1024),
-			resolver.FormatRate(iface.TxMBs*1024*1024),
+			resolver.FormatRate(iface.RxBps),
+			resolver.FormatRate(iface.TxBps),
 			errStr,
 		))
 
