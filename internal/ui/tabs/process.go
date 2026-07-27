@@ -85,11 +85,15 @@ var signalMenuItems = []struct {
 	name string
 	sig  syscall.Signal
 }{
-	{"15 SIGTERM (Graceful Kill)", syscall.SIGTERM},
-	{"9  SIGKILL (Force Kill)", syscall.SIGKILL},
-	{"19 SIGSTOP (Suspend)", syscall.SIGSTOP},
-	{"18 SIGCONT (Resume)", syscall.SIGCONT},
-	{"1  SIGHUP  (Reload)", syscall.SIGHUP},
+	{"15 SIGTERM (Graceful Terminate)", syscall.SIGTERM},
+	{"9  SIGKILL (Force Kill — requires PID entry)", syscall.SIGKILL},
+	{"19 SIGSTOP (Suspend Process Execution)", syscall.SIGSTOP},
+	{"18 SIGCONT (Resume Suspended Process)", syscall.SIGCONT},
+	{"1  SIGHUP  (Reload Configuration / Hangup)", syscall.SIGHUP},
+	{"2  SIGINT  (Interrupt / Ctrl+C)", syscall.SIGINT},
+	{"3  SIGQUIT (Quit with Core Dump)", syscall.SIGQUIT},
+	{"10 SIGUSR1 (User Signal 1 — Log Rotation)", syscall.SIGUSR1},
+	{"12 SIGUSR2 (User Signal 2 — Zero-Downtime Upgrade)", syscall.SIGUSR2},
 }
 
 func NewProcess(b *bus.Bus, cfg config.Config) *Process {
@@ -100,6 +104,10 @@ func NewProcess(b *bus.Bus, cfg config.Config) *Process {
 		sortReverse: false,
 	}
 	return p
+}
+
+func (p *Process) IsInputActive() bool {
+	return p.killMode > 0 || p.filterMode || p.sortMenuMode
 }
 
 func (p *Process) SetAudit(a *audit.Service) { p.auditSvc = a }
@@ -446,8 +454,27 @@ func (p *Process) renderTable() string {
 		rows = append(rows, style.Render(line))
 	}
 
-	// Viewport windowing based on cursor.
-	viewHeight := p.height - 13
+	// Viewport windowing based on cursor with dynamic dialog height compensation.
+	extraHeight := 8
+	if p.filterMode || p.filter != "" {
+		extraHeight += 2
+	}
+	if p.killMode > 0 {
+		if p.killMode == 3 {
+			extraHeight += len(signalMenuItems) + 3
+		} else {
+			extraHeight += 3
+		}
+	}
+	if p.sortMenuMode {
+		extraHeight += len(sortMenuItems) + 3
+	}
+
+	viewHeight := p.height - extraHeight
+	if viewHeight < 3 {
+		viewHeight = 3
+	}
+
 	if viewHeight > 0 && len(rows) > viewHeight {
 		startIdx := p.cursor - viewHeight/2
 		if startIdx < 0 {
@@ -457,6 +484,9 @@ func (p *Process) renderTable() string {
 		if endIdx > len(rows) {
 			endIdx = len(rows)
 			startIdx = endIdx - viewHeight
+		}
+		if startIdx < 0 {
+			startIdx = 0
 		}
 		rows = rows[startIdx:endIdx]
 	}

@@ -65,6 +65,10 @@ func NewUsers(b *bus.Bus, cfg config.Config) *Users {
 	}
 }
 
+func (u *Users) IsInputActive() bool {
+	return u.addMode || u.delMode > 0 || u.filterMode
+}
+
 func (u *Users) SetUsers(svc *users.Service) { u.userSvc = svc }
 func (u *Users) SetAudit(a *audit.Service)   { u.auditSvc = a }
 

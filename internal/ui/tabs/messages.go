@@ -10,3 +10,8 @@ type JumpToTabMsg struct {
 type PayloadReceiver interface {
 	ReceivePayload(payload interface{})
 }
+
+// InputCapturer is an interface for tab models that capture text/numeric input or modal dialogs.
+type InputCapturer interface {
+	IsInputActive() bool
+}

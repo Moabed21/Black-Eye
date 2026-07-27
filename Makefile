@@ -7,7 +7,7 @@ GO      := $(HOME)/go/bin/go
 .PHONY: all clean re run test tidy vendor lint
 
 # Build the binary
-all: vendor
+all: tidy
 	$(GO) build $(GOFLAGS) -o $(BINARY) .
 
 # Clean build artifacts
@@ -22,8 +22,8 @@ run: all
 	./$(BINARY)
 
 # Run tests
-test: vendor
-	$(GO) test ./internal/... -coverprofile=coverage.out -covermode=atomic
+test: tidy
+	$(GO) test ./... -coverprofile=coverage.out -covermode=atomic
 	$(GO) tool cover -func=coverage.out | grep total
 
 # Resolve and tidy modules

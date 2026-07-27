@@ -4,6 +4,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"blackeye/internal/config"
 	"blackeye/internal/privilege"
 	"blackeye/internal/services/alerts"
+	"blackeye/internal/services/diagnostics"
+	"blackeye/internal/services/exporter"
 	"blackeye/internal/ui/styles"
 	"blackeye/internal/ui/tabs"
 )
@@ -51,6 +54,23 @@ var tabNames = [TabCount]string{
 	"[0] Advanced",
 }
 
+var wizardMetrics = []struct {
+	Key  string
+	Name string
+	Unit string
+	Min  float64
+	Max  float64
+}{
+	{Key: "cpu", Name: "CPU Utilization", Unit: "%", Min: 1, Max: 100},
+	{Key: "ram", Name: "RAM Utilization", Unit: "%", Min: 1, Max: 100},
+	{Key: "swap", Name: "Swap Utilization", Unit: "%", Min: 1, Max: 100},
+	{Key: "disk", Name: "Root Disk Usage", Unit: "%", Min: 1, Max: 100},
+	{Key: "temp", Name: "Core Temperature", Unit: "°C", Min: 20, Max: 120},
+	{Key: "auth_failures", Name: "Auth Failure Count", Unit: "attempts", Min: 1, Max: 1000},
+}
+
+var wizardOps = []string{"> (Greater than)", ">= (Greater or equal)", "< (Less than)", "== (Equals)"}
+
 // Model is the root bubbletea model.
 type Model struct {
 	width     int
@@ -68,6 +88,20 @@ type Model struct {
 	alertSnap   *alerts.Snapshot
 	alertToast  string
 	alertExpiry time.Time
+
+	// v1.2.4 Modal & Sampling State
+	diagOpen       bool
+	alertModalOpen bool
+	samplingMode   int // 0=Turbo (1s), 1=Balanced (2s), 2=Eco (5s)
+
+	// Fault-Preventative Custom Alert Rule Wizard State
+	ruleWizardOpen   bool
+	ruleWizardStep   int // 0 = Select Metric, 1 = Select Operator, 2 = Enter Value, 3 = Enter Label
+	ruleMetricIdx    int
+	ruleOpIdx        int
+	ruleValInput     string
+	ruleLabelInput   string
+	ruleWizardErrMsg string
 }
 
 // New creates the root model and initialises all tab models.
@@ -231,6 +265,104 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// When active tab is capturing text/numeric input (e.g. typing PIDs, ports, usernames, filters),
+		// forward ALL keypresses directly to it instead of switching tabs or quitting.
+		if capturer, ok := m.tabs[m.activeTab].(tabs.InputCapturer); ok && capturer.IsInputActive() {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			var cmd tea.Cmd
+			m.tabs[m.activeTab], cmd = m.tabs[m.activeTab].Update(msg)
+			return m, cmd
+		}
+
+		if m.ruleWizardOpen {
+			switch msg.String() {
+			case "esc":
+				m.ruleWizardOpen = false
+				return m, nil
+			case "up", "k":
+				if m.ruleWizardStep == 0 && m.ruleMetricIdx > 0 {
+					m.ruleMetricIdx--
+				} else if m.ruleWizardStep == 1 && m.ruleOpIdx > 0 {
+					m.ruleOpIdx--
+				}
+			case "down", "j":
+				if m.ruleWizardStep == 0 && m.ruleMetricIdx < len(wizardMetrics)-1 {
+					m.ruleMetricIdx++
+				} else if m.ruleWizardStep == 1 && m.ruleOpIdx < len(wizardOps)-1 {
+					m.ruleOpIdx++
+				}
+			case "backspace":
+				if m.ruleWizardStep == 2 && len(m.ruleValInput) > 0 {
+					m.ruleValInput = m.ruleValInput[:len(m.ruleValInput)-1]
+					m.ruleWizardErrMsg = ""
+				} else if m.ruleWizardStep == 3 && len(m.ruleLabelInput) > 0 {
+					m.ruleLabelInput = m.ruleLabelInput[:len(m.ruleLabelInput)-1]
+				}
+			case "enter":
+				if m.ruleWizardStep == 0 {
+					m.ruleWizardStep = 1
+				} else if m.ruleWizardStep == 1 {
+					m.ruleWizardStep = 2
+				} else if m.ruleWizardStep == 2 {
+					val, err := strconv.ParseFloat(m.ruleValInput, 64)
+					met := wizardMetrics[m.ruleMetricIdx]
+					if err != nil || val < met.Min || val > met.Max {
+						m.ruleWizardErrMsg = fmt.Sprintf("⚠️ Fault Preventer: Value must be a valid number between %.0f and %.0f %s", met.Min, met.Max, met.Unit)
+						return m, nil
+					}
+					m.ruleWizardErrMsg = ""
+					m.ruleWizardStep = 3
+				} else if m.ruleWizardStep == 3 {
+					met := wizardMetrics[m.ruleMetricIdx]
+					val, _ := strconv.ParseFloat(m.ruleValInput, 64)
+					opStr := []string{">", ">=", "<", "=="}[m.ruleOpIdx]
+					label := strings.TrimSpace(m.ruleLabelInput)
+					if label == "" {
+						label = fmt.Sprintf("%s %s %.0f%s", met.Name, opStr, val, met.Unit)
+					}
+
+					newRule := config.CustomRule{
+						ID:       fmt.Sprintf("rule_%d", time.Now().Unix()),
+						Metric:   met.Key,
+						Operator: opStr,
+						Value:    val,
+						Severity: "warning",
+						Label:    label,
+					}
+					if err := newRule.Validate(); err != nil {
+						m.ruleWizardErrMsg = "⚠️ Rule validation error: " + err.Error()
+						return m, nil
+					}
+					m.cfg.Alerts.CustomRules = append(m.cfg.Alerts.CustomRules, newRule)
+					m.ruleWizardOpen = false
+					m.alertToast = "Custom alert rule created: " + label
+					m.alertExpiry = time.Now().Add(4 * time.Second)
+					return m, nil
+				}
+			default:
+				if len(msg.String()) == 1 {
+					ch := msg.String()[0]
+					if m.ruleWizardStep == 2 && (ch >= '0' && ch <= '9' || ch == '.') {
+						m.ruleValInput += msg.String()
+						m.ruleWizardErrMsg = ""
+					} else if m.ruleWizardStep == 3 && (ch >= ' ' && ch <= '~') {
+						m.ruleLabelInput += msg.String()
+					}
+				}
+			}
+			return m, nil
+		}
+
+		if m.diagOpen || m.alertModalOpen {
+			if msg.String() == "esc" || msg.String() == "q" {
+				m.diagOpen = false
+				m.alertModalOpen = false
+				return m, nil
+			}
+		}
+
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -246,6 +378,55 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "?":
 			m.helpOpen = true
 			return m, nil
+		case "h", "H":
+			if m.activeTab != TabUsers {
+				m.diagOpen = !m.diagOpen
+				return m, nil
+			}
+		case "t", "T":
+			if m.activeTab != TabProcess {
+				themeName := styles.CycleTheme()
+				m.alertToast = "Theme switched: " + themeName
+				m.alertExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
+			}
+		case "a", "A":
+			if m.activeTab != TabDocker && m.activeTab != TabFirewall && m.activeTab != TabUsers {
+				m.alertModalOpen = !m.alertModalOpen
+				return m, nil
+			}
+		case "r", "R":
+			if m.activeTab != TabProcess && m.activeTab != TabDocker && m.activeTab != TabServices && m.activeTab != TabPackages {
+				m.samplingMode = (m.samplingMode + 1) % 3
+				modes := []string{"Turbo (1s)", "Balanced (2s)", "Eco (5s)"}
+				m.alertToast = "Sampling mode: " + modes[m.samplingMode]
+				m.alertExpiry = time.Now().Add(3 * time.Second)
+				return m, nil
+			}
+		case "c", "C":
+			if m.alertModalOpen {
+				m.ruleWizardOpen = true
+				m.ruleWizardStep = 0
+				m.ruleMetricIdx = 0
+				m.ruleOpIdx = 0
+				m.ruleValInput = ""
+				m.ruleLabelInput = ""
+				m.ruleWizardErrMsg = ""
+				return m, nil
+			}
+		case "e", "E":
+			if m.activeTab != TabFirewall && m.activeTab != TabServices {
+				data := map[string]interface{}{
+					"timestamp": time.Now(),
+					"activeTab": tabNames[m.activeTab],
+					"alerts":    m.alertSnap,
+				}
+				if path, err := exporter.ExportJSONSnapshot(data, ""); err == nil {
+					m.alertToast = "JSON Snapshot saved to " + path
+					m.alertExpiry = time.Now().Add(4 * time.Second)
+				}
+				return m, nil
+			}
 		case "1":
 			m.activeTab = TabDashboard
 		case "2":
@@ -323,6 +504,12 @@ func (m *Model) View() string {
 			}
 		}
 		content = lipgloss.JoinVertical(lipgloss.Left, content, helpDrawer)
+	} else if m.ruleWizardOpen {
+		content = m.renderRuleWizardModal()
+	} else if m.diagOpen {
+		content = m.renderDiagnosticsModal()
+	} else if m.alertModalOpen {
+		content = m.renderAlertModal()
 	} else {
 		if availH > 0 {
 			lines := strings.Split(content, "\n")
@@ -383,7 +570,8 @@ func (m *Model) renderStatusBar() string {
 		toast = "  │  " + strings.Join(toastParts, "  ")
 	}
 
-	right := styles.TextMuted.Render("q quit  │  ? help  │  1–9,0 tabs  ")
+	samplingStr := []string{"🚀 1s", "⚖ 2s", "🍃 5s"}[m.samplingMode]
+	right := styles.TextMuted.Render(fmt.Sprintf("%s  │  q quit  │  ? help  │  1–9,0 tabs  ", samplingStr))
 
 	width := m.width - lipgloss.Width(left) - lipgloss.Width(toast) - lipgloss.Width(right)
 	if width < 0 {
@@ -417,7 +605,35 @@ func (m *Model) renderHelpDrawer() string {
 		helpContent = m.getGlobalHelpText()
 	}
 
-	footer := styles.TextMuted.Render("  [g] toggle mode  │  ↑/↓ / PgUp scroll  │  Esc/? close help")
+	lines := strings.Split(helpContent, "\n")
+	total := len(lines)
+	viewH := m.height - 14
+	if viewH < 5 {
+		viewH = 5
+	}
+
+	maxOffset := total - viewH
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.helpScrollOffset > maxOffset {
+		m.helpScrollOffset = maxOffset
+	}
+	if m.helpScrollOffset < 0 {
+		m.helpScrollOffset = 0
+	}
+
+	end := m.helpScrollOffset + viewH
+	if end > total {
+		end = total
+	}
+	visibleLines := lines[m.helpScrollOffset:end]
+
+	scrollInfo := ""
+	if maxOffset > 0 {
+		scrollInfo = fmt.Sprintf("  │  Line %d/%d (↓/↑ or j/k scroll)", m.helpScrollOffset+1, total)
+	}
+	footer := styles.TextMuted.Render("  [g] toggle mode  │  Esc/? close help" + scrollInfo)
 
 	boxWidth := m.width - 4
 	if boxWidth < 40 {
@@ -427,7 +643,7 @@ func (m *Model) renderHelpDrawer() string {
 	card := lipgloss.JoinVertical(lipgloss.Left,
 		modeBar,
 		"",
-		helpContent,
+		strings.Join(visibleLines, "\n"),
 		"",
 		footer,
 	)
@@ -539,7 +755,12 @@ func (m *Model) getGlobalHelpText() string {
 	rawHelp := styles.TextBold.Render("Global Shortcuts\n") +
 		"  q / Ctrl+C   Quit application\n" +
 		"  1–9,0        Switch between tabs\n" +
-		"  ?            Toggle this help screen\n\n" +
+		"  ?            Toggle this help screen\n" +
+		"  H            Run System Health Diagnostics Report (PASS/WARN/FAIL)\n" +
+		"  T            Cycle live Color Theme (Classic, Cyberpunk, Dracula, Matrix, Slate)\n" +
+		"  A            View System Warning & Alert History Log (Max 50)\n" +
+		"  R            Toggle sampling mode (1s Turbo, 2s Balanced, 5s Eco)\n" +
+		"  E            Dump complete JSON system snapshot to file\n\n" +
 		styles.TextBold.Render("Dashboard Tab (1)\n") +
 		"  Mouse Drag   Drag & drop panel headers to rearrange layout\n" +
 		"  ↑/↓ / PgUp   Scroll dashboard view up and down\n" +
@@ -629,32 +850,168 @@ func (m *Model) getGlobalHelpText() string {
 		"  k            Terminate highlighted active SSH login session (root / CAP_KILL required)\n" +
 		"  b            Instant Firewall IP Ban for highlighted SSH session remote IP\n"
 
-	lines := strings.Split(rawHelp, "\n")
-	total := len(lines)
+	return rawHelp
+}
 
-	viewH := m.height - 12
-	if viewH < 5 {
-		viewH = 5
+func (m *Model) renderDiagnosticsModal() string {
+	report := diagnostics.RunDiagnostics(nil, nil)
+
+	header := styles.PanelTitleStyle.Render("  🩺 System Health Diagnostics Report (PASS: " +
+		fmt.Sprintf("%d", report.PassCount) + " │ WARN: " +
+		fmt.Sprintf("%d", report.WarnCount) + " │ FAIL: " +
+		fmt.Sprintf("%d", report.FailCount) + ")")
+
+	var rows []string
+	rows = append(rows, styles.TableHeader.Render(fmt.Sprintf("  %-18s  %-32s  %-8s  %-30s", "Category", "Audit Item", "Status", "Details & Remediation")))
+
+	for _, item := range report.Items {
+		statusBadge := styles.TextGreen.Render("[PASS]")
+		if item.Status == diagnostics.StatusWarn {
+			statusBadge = styles.TextYellow.Render("[WARN]")
+		} else if item.Status == diagnostics.StatusFail {
+			statusBadge = styles.TextRed.Render("[FAIL]")
+		}
+		rows = append(rows, fmt.Sprintf("  %-18s  %-32s  %-8s  %-30s",
+			styles.Truncate(item.Category, 18),
+			styles.Truncate(item.Name, 32),
+			statusBadge,
+			styles.Truncate(item.Detail+" — "+item.Tip, 30),
+		))
 	}
 
-	maxOffset := total - viewH
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
-	if m.helpScrollOffset > maxOffset {
-		m.helpScrollOffset = maxOffset
-	}
-	if m.helpScrollOffset < 0 {
-		m.helpScrollOffset = 0
+	footer := styles.TextMuted.Render("  Press Esc or q to close diagnostics report")
+
+	card := lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		"",
+		strings.Join(rows, "\n"),
+		"",
+		footer,
+	)
+
+	boxWidth := m.width - 4
+	if boxWidth < 40 {
+		boxWidth = 40
 	}
 
-	end := m.helpScrollOffset + viewH
-	if end > total {
-		end = total
+	return styles.PanelStyle.Copy().
+		Width(boxWidth).
+		BorderForeground(styles.ColorGold).
+		Render(card)
+}
+
+func (m *Model) renderAlertModal() string {
+	header := styles.PanelTitleStyle.Render("  🚨 System Warning & Alert History Log (Max 50)")
+
+	var rows []string
+	rows = append(rows, styles.TableHeader.Render(fmt.Sprintf("  %-12s  %-10s  %-18s  %-40s", "Time", "Level", "Source", "Message")))
+
+	if m.alertSnap != nil && len(m.alertSnap.History) > 0 {
+		for _, a := range m.alertSnap.History {
+			levelBadge := styles.TextYellow.Render("WARNING")
+			if a.Level == alerts.AlertCritical {
+				levelBadge = styles.TextRed.Render("CRITICAL")
+			}
+			timeStr := a.Timestamp.Format("15:04:05")
+			rows = append(rows, fmt.Sprintf("  %-12s  %-10s  %-18s  %-40s",
+				timeStr,
+				levelBadge,
+				styles.Truncate(a.Source, 18),
+				styles.Truncate(a.Message, 40),
+			))
+		}
+	} else {
+		rows = append(rows, styles.TextGreen.Render("  No threshold warnings recorded"))
 	}
-	visibleLines := lines[m.helpScrollOffset:end]
-	if maxOffset > 0 {
-		return strings.Join(visibleLines, "\n") + "\n" + styles.TextMuted.Render(fmt.Sprintf("  (Scroll offset: +%d/%d)", m.helpScrollOffset, maxOffset))
+
+	footer := styles.TextMuted.Render("  Press Esc or q to close alert log drawer  │  Press 'c' to launch Custom Alert Rule Wizard")
+
+	card := lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		"",
+		strings.Join(rows, "\n"),
+		"",
+		footer,
+	)
+
+	boxWidth := m.width - 4
+	if boxWidth < 40 {
+		boxWidth = 40
 	}
-	return strings.Join(visibleLines, "\n")
+
+	return styles.PanelStyle.Copy().
+		Width(boxWidth).
+		BorderForeground(styles.ColorGold).
+		Render(card)
+}
+
+func (m *Model) renderRuleWizardModal() string {
+	header := styles.PanelTitleStyle.Render("  🛡️ Fault-Preventative Custom Alert Rule Wizard")
+
+	stepTitles := []string{
+		"Step 1/4: Select Metric to Monitor",
+		"Step 2/4: Select Comparison Operator",
+		"Step 3/4: Enter Threshold Numeric Value",
+		"Step 4/4: Enter Custom Alert Label / Description",
+	}
+
+	var rows []string
+	rows = append(rows, styles.TextBold.Render("  "+stepTitles[m.ruleWizardStep]))
+	rows = append(rows, "")
+
+	if m.ruleWizardStep == 0 {
+		for i, met := range wizardMetrics {
+			if i == m.ruleMetricIdx {
+				rows = append(rows, styles.TableRowSelected.Render(fmt.Sprintf("  > %s (%s)", met.Name, met.Unit)))
+			} else {
+				rows = append(rows, styles.TextNormal.Render(fmt.Sprintf("    %s (%s)", met.Name, met.Unit)))
+			}
+		}
+	} else if m.ruleWizardStep == 1 {
+		for i, op := range wizardOps {
+			if i == m.ruleOpIdx {
+				rows = append(rows, styles.TableRowSelected.Render("  > "+op))
+			} else {
+				rows = append(rows, styles.TextNormal.Render("    "+op))
+			}
+		}
+	} else if m.ruleWizardStep == 2 {
+		met := wizardMetrics[m.ruleMetricIdx]
+		rows = append(rows, fmt.Sprintf("  Target Metric: %s", styles.TextAccent.Render(met.Name)))
+		rows = append(rows, fmt.Sprintf("  Valid Range:   %.0f to %.0f %s", met.Min, met.Max, met.Unit))
+		rows = append(rows, "")
+		rows = append(rows, fmt.Sprintf("  Enter Threshold Value: %s█", styles.TextAccent.Render(m.ruleValInput)))
+	} else if m.ruleWizardStep == 3 {
+		met := wizardMetrics[m.ruleMetricIdx]
+		opStr := []string{">", ">=", "<", "=="}[m.ruleOpIdx]
+		rows = append(rows, fmt.Sprintf("  Rule Condition: %s %s %s %s", met.Name, opStr, m.ruleValInput, met.Unit))
+		rows = append(rows, "")
+		rows = append(rows, fmt.Sprintf("  Enter Custom Label: %s█", styles.TextAccent.Render(m.ruleLabelInput)))
+		rows = append(rows, styles.TextMuted.Render("  (Leave empty for auto-generated label)"))
+	}
+
+	if m.ruleWizardErrMsg != "" {
+		rows = append(rows, "")
+		rows = append(rows, styles.TextRed.Render("  "+m.ruleWizardErrMsg))
+	}
+
+	footer := styles.TextMuted.Render("  Use ↑/↓ to navigate  │  Enter to proceed  │  ESC to cancel")
+
+	card := lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		"",
+		strings.Join(rows, "\n"),
+		"",
+		footer,
+	)
+
+	boxWidth := m.width - 4
+	if boxWidth < 50 {
+		boxWidth = 50
+	}
+
+	return styles.PanelStyle.Copy().
+		Width(boxWidth).
+		BorderForeground(styles.ColorGold).
+		Render(card)
 }

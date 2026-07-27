@@ -1,6 +1,6 @@
-# BlackEye v1.2.3 — Linux System Administration Dashboard
+# BlackEye v1.2.4 — Linux System Administration Dashboard
 
-![Version](https://img.shields.io/badge/version-1.2.3-gold.svg)
+![Version](https://img.shields.io/badge/version-1.2.4-gold.svg)
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Go Version](https://img.shields.io/badge/go-%E2%89%A51.21-00ADD8.svg)
@@ -21,19 +21,21 @@ A real-time, high-performance TUI (Terminal User Interface) system monitor and a
 │  RAM:  5.2 GiB / 15.6 GiB  ████████████░░░░░░░░░░░░  33%                                                                     │
 │  Swap: 0.1 GiB /  4.0 GiB  █░░░░░░░░░░░░░░░░░░░░░░░   3%                                                                    │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-  BlackEye v1.2.3  │  ● normal                                                                      q quit  │  ? help  │  1–9,0 tabs
+  BlackEye v1.2.4  │  ● normal                                                                      q quit  │  ? help  │  1–9,0 tabs
 ```
 
-**Theme:** Premium **Navy Blue & Gold** color palette with dynamic highlighting, alert toasts (⚠/🔴), and drag-and-drop panel header positioning.
+**Theme:** 5 Live Switchable Color Themes (Classic Navy & Gold, Cyberpunk Neon, Dracula Dark, Matrix Emerald, High Contrast Slate).
 
 ---
 
-## What's New in v1.2.3
+## What's New in v1.2.4
 
-- **Context-Sensitive Tab Help Drawer (`?`)**: Active-tab contextual help cards anchored at the bottom of the workspace above the status bar. Displays focused 1-screen keybindings tailored to the active tab without obscuring the live dashboard, with an interactive **`g`** key toggle to switch to the Global Cheat Sheet.
-- **Network Rate Auto-Scaling & Lifetime Totals**: Auto-scaling bandwidth rates (`B/s`, `KB/s`, `MB/s`, `GB/s`) and total lifetime byte transfers (`RxBytesTotal` / `TxBytesTotal`) across Tab 1 (Dashboard) and Tab 3 (Network).
-- **List Boundary Clamping & Margin Protection**: Strict cursor bounds checking across all 10 tab models (Processes, Network, Docker, Services, Firewall, Packages, Users, Advanced) preventing list overflow and table margin breakage.
-- **Mount Path Resolution Fix**: Excluded root `/` from partial parent mount matching to eliminate inaccurate mount point lookups.
+- **System Health Diagnostics Report (`H` Key)**: Live PASS/WARN/FAIL health check modal auditing disk space, RAM/Swap saturation, failed systemd units, firewall state, SSH policy, and SUID risks.
+- **Dynamic Color Theme Switcher (`T` Key)**: Live cycling between 5 themes: **Classic Navy & Gold**, **Cyberpunk Neon**, **Dracula Dark**, **Matrix Emerald**, and **High Contrast Slate**.
+- **Alert History Drawer & Telemetry Monitoring (`A` Key)**: Interactive Alert Log drawer displaying active & historical threshold breaches (CPU%, RAM%, Swap%, Disk%, Temp, unencrypted WAN sockets, brute-force auth IPs).
+- **Adaptive Sampling Rate Switcher (`R` Key)**: Toggle background telemetry sampling frequency live between **Turbo (1s)**, **Balanced (2s)**, and **Eco (5s)**.
+- **JSON System Snapshot Exporter (`E` Key)**: One-key dump of complete structured JSON system state snapshots to `~/.local/share/blackeye/snapshot_<timestamp>.json`.
+- **Numeric Input Lock & Key Navigation Fix**: Smart input focus lock preventing tab switching while typing PIDs, port numbers, or search filters.
 - **Live Docker Operations (Tab 4)**: Container lifecycle management (**Start**, **Stop**, **Restart**, **Pause/Unpause**, **Remove**, **Logs**) with interactive confirmation dialogs and security audit logging.
 - **Multi-Engine Firewall Switcher (Tab 7)**: Live engine switcher (**`b`** key) allowing seamless toggling between detected firewall engines (`ufw`, `firewalld`, `iptables`, `nftables`).
 - **Package Category Filtering & Safety Warnings (Tab 8)**: Categorize packages by `🛡️ System Core`, `👤 User App`, `📦 Library`, and `🛠️ Dev` (**`c`** key), featuring red **System Core removal warning banners**.

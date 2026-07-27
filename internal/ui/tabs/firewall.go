@@ -95,6 +95,10 @@ func NewFirewall(b *bus.Bus, cfg config.Config) *Firewall {
 	}
 }
 
+func (f *Firewall) IsInputActive() bool {
+	return f.addMode || f.delMode > 0
+}
+
 func (f *Firewall) SetFirewall(svc *firewall.Service) { f.fwSvc = svc }
 func (f *Firewall) SetAudit(a *audit.Service)         { f.auditSvc = a }
 

@@ -34,16 +34,54 @@ type RefreshConfig struct {
 	DmesgStreaming    bool `toml:"dmesg_streaming"`
 }
 
+// CustomRule defines user-configured threshold alerts.
+type CustomRule struct {
+	ID       string  `toml:"id"`
+	Metric   string  `toml:"metric"`   // "cpu", "ram", "swap", "disk", "temp", "auth_failures"
+	Operator string  `toml:"operator"` // ">", ">=", "<", "=="
+	Value    float64 `toml:"value"`
+	Severity string  `toml:"severity"` // "warning", "critical"
+	Label    string  `toml:"label"`
+}
+
+func (r CustomRule) Validate() error {
+	validMetrics := map[string]bool{"cpu": true, "ram": true, "swap": true, "disk": true, "temp": true, "auth_failures": true}
+	if !validMetrics[r.Metric] {
+		return fmt.Errorf("invalid metric: %s", r.Metric)
+	}
+	validOps := map[string]bool{">": true, ">=": true, "<": true, "==": true}
+	if !validOps[r.Operator] {
+		return fmt.Errorf("invalid operator: %s", r.Operator)
+	}
+
+	switch r.Metric {
+	case "cpu", "ram", "swap", "disk":
+		if r.Value < 1.0 || r.Value > 100.0 {
+			return fmt.Errorf("%s percentage threshold must be between 1%% and 100%%", r.Metric)
+		}
+	case "temp":
+		if r.Value < 20.0 || r.Value > 120.0 {
+			return fmt.Errorf("temperature threshold must be between 20°C and 120°C")
+		}
+	case "auth_failures":
+		if r.Value < 1.0 || r.Value > 1000.0 {
+			return fmt.Errorf("auth failures count must be between 1 and 1000")
+		}
+	}
+	return nil
+}
+
 // AlertsConfig defines percentage/degree thresholds for color coding.
 type AlertsConfig struct {
-	CPUWarning    float64 `toml:"cpu_warning"`
-	CPUCritical   float64 `toml:"cpu_critical"`
-	MemoryWarning  float64 `toml:"memory_warning"`
-	MemoryCritical float64 `toml:"memory_critical"`
-	DiskWarning    float64 `toml:"disk_warning"`
-	DiskCritical   float64 `toml:"disk_critical"`
-	TempWarning    float64 `toml:"temp_warning"`
-	TempCritical   float64 `toml:"temp_critical"`
+	CPUWarning    float64      `toml:"cpu_warning"`
+	CPUCritical   float64      `toml:"cpu_critical"`
+	MemoryWarning  float64      `toml:"memory_warning"`
+	MemoryCritical float64      `toml:"memory_critical"`
+	DiskWarning    float64      `toml:"disk_warning"`
+	DiskCritical   float64      `toml:"disk_critical"`
+	TempWarning    float64      `toml:"temp_warning"`
+	TempCritical   float64      `toml:"temp_critical"`
+	CustomRules    []CustomRule `toml:"custom_rules"`
 }
 
 // PortsConfig controls port highlighting behavior.

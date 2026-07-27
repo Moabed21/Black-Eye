@@ -37,9 +37,10 @@ type Alert struct {
 	Timestamp time.Time
 }
 
-// Snapshot is the published payload — a batch of currently active alerts.
+// Snapshot is the published payload — a batch of currently active and historical alerts.
 type Snapshot struct {
 	Active    []Alert
+	History   []Alert
 	Timestamp time.Time
 }
 
@@ -53,6 +54,7 @@ type Service struct {
 
 	mu      sync.Mutex
 	active  map[string]Alert // keyed by source
+	history []Alert          // historical alert log (max 50)
 	subCPU  <-chan interface{}
 	subMem  <-chan interface{}
 	subDisk <-chan interface{}
@@ -142,6 +144,42 @@ func (s *Service) checkCPU(snap cpu.Snapshot) {
 	} else {
 		s.clearAlert(key)
 	}
+
+	for _, rule := range cfg.Alerts.CustomRules {
+		if rule.Metric == "cpu" {
+			ruleKey := "Custom: " + rule.Label
+			if EvaluateCustomRule(rule, pct) {
+				lvl := AlertWarning
+				if rule.Severity == "critical" {
+					lvl = AlertCritical
+				}
+				s.setAlert(ruleKey, Alert{
+					Level:     lvl,
+					Source:    ruleKey,
+					Message:   fmt.Sprintf("%s (%.1f %s %.1f)", rule.Label, pct, rule.Operator, rule.Value),
+					Value:     pct,
+					Threshold: rule.Value,
+					Timestamp: time.Now(),
+				})
+			} else {
+				s.clearAlert(ruleKey)
+			}
+		}
+	}
+}
+
+func EvaluateCustomRule(r config.CustomRule, val float64) bool {
+	switch r.Operator {
+	case ">":
+		return val > r.Value
+	case ">=":
+		return val >= r.Value
+	case "<":
+		return val < r.Value
+	case "==":
+		return val == r.Value
+	}
+	return false
 }
 
 func (s *Service) checkMemory(snap memory.Snapshot) {
@@ -244,6 +282,10 @@ func (s *Service) checkThermal(snap thermal.Snapshot) {
 func (s *Service) setAlert(key string, alert Alert) {
 	s.mu.Lock()
 	s.active[key] = alert
+	s.history = append([]Alert{alert}, s.history...)
+	if len(s.history) > 50 {
+		s.history = s.history[:50]
+	}
 	s.publishLocked()
 	s.mu.Unlock()
 }
@@ -264,6 +306,7 @@ func (s *Service) publishLocked() {
 	}
 	snap := Snapshot{
 		Active:    alerts,
+		History:   s.history,
 		Timestamp: time.Now(),
 	}
 	select {

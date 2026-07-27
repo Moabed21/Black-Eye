@@ -85,6 +85,10 @@ func NewPackages(b *bus.Bus, cfg config.Config) *Packages {
 	}
 }
 
+func (p *Packages) IsInputActive() bool {
+	return p.filterMode || p.opMode > 0
+}
+
 func (p *Packages) SetPackages(svc *packages.Service) { p.pkgSvc = svc }
 func (p *Packages) SetAudit(a *audit.Service)        { p.auditSvc = a }
 
