@@ -31,17 +31,20 @@ type ListenerSnapshot struct {
 	DisplayProcess string // "sshd (SSH Daemon)"
 	Owner          string // "root"
 	PID            int
-	Flagged        bool   // true = non-root process on port < 1024
+	Flagged        bool // true = non-root process on port < 1024
+	IsUnencrypted  bool // true = HTTP 80, FTP 21, Telnet 23, POP3 110, IMAP 143, etc.
 }
 
 // ConnectionSnapshot is one row in the Active Connections table.
 type ConnectionSnapshot struct {
 	LocalDisplay   string // "localhost:ssh (22)"
 	RemoteDisplay  string // "192.168.1.10:52341"
+	RemoteIP       string // "192.168.1.10"
 	DisplayState   string // "ESTABLISHED (Connected)"
 	DisplayProcess string // "sshd (SSH Daemon)"
 	Owner          string
 	PID            int
+	IsPublicWAN    bool // true if remote IP is a public WAN address
 }
 
 // PortsSnapshot is the published payload.
@@ -143,6 +146,7 @@ func (s *Service) collect() (PortsSnapshot, error) {
 			if e.state == "0A" { // LISTEN
 				scope, scopeRaw := scopeLabel(e.localAddr)
 				flagged := !s.trustedPorts[e.localPort] && e.localPort < 1024 && uid != 0 && uid != -1
+				unenc := e.localPort == 21 || e.localPort == 23 || e.localPort == 80 || e.localPort == 110 || e.localPort == 143 || e.localPort == 389 || e.localPort == 25
 				listeners = append(listeners, ListenerSnapshot{
 					DisplayService: resolver.Port(e.localPort),
 					RawPort:        e.localPort,
@@ -153,17 +157,21 @@ func (s *Service) collect() (PortsSnapshot, error) {
 					Owner:          owner,
 					PID:            pid,
 					Flagged:        flagged,
+					IsUnencrypted:  unenc,
 				})
 			} else if e.state != "07" { // skip CLOSE
 				localDisp := fmt.Sprintf("%s:%s", localAddrDisplay(e.localAddr), resolver.Port(e.localPort))
 				remoteDisp := fmt.Sprintf("%s:%s", e.remoteAddr, resolver.Port(e.remotePort))
+				isWAN := e.remoteAddr != "" && e.remoteAddr != "0.0.0.0" && e.remoteAddr != "127.0.0.1" && e.remoteAddr != "::" && e.remoteAddr != "::1" && !isRFC1918(e.remoteAddr)
 				connections = append(connections, ConnectionSnapshot{
 					LocalDisplay:   localDisp,
 					RemoteDisplay:  remoteDisp,
+					RemoteIP:       e.remoteAddr,
 					DisplayState:   resolver.TCPState(e.state),
 					DisplayProcess: displayProc,
 					Owner:          owner,
 					PID:            pid,
+					IsPublicWAN:    isWAN,
 				})
 			}
 		}

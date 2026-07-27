@@ -110,15 +110,49 @@ func (a *Advanced) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.cursor--
 		}
 	case "down", "j":
-		a.cursor++
+		max := a.maxItems()
+		if max > 0 && a.cursor < max-1 {
+			a.cursor++
+		}
 	case "k", "x":
 		if a.panel == advSubSSH && privilege.CanKill() {
 			if a.snap != nil && a.cursor < len(a.snap.SSHSessions) {
 				a.termMode = 1
 			}
 		}
+	case "b":
+		if a.panel == advSubSSH && a.snap != nil && a.cursor < len(a.snap.SSHSessions) {
+			sess := a.snap.SSHSessions[a.cursor]
+			if sess.FromIP != "" && sess.FromIP != "local" {
+				ip := sess.FromIP
+				return a, func() tea.Msg {
+					return JumpToTabMsg{
+						TabIndex: 6, // TabFirewall
+						Payload: FirewallPrefill{
+							Source: ip,
+							Action: "DROP",
+						},
+					}
+				}
+			}
+		}
 	}
 	return a, nil
+}
+
+func (a *Advanced) maxItems() int {
+	if a.snap == nil {
+		return 0
+	}
+	switch a.panel {
+	case advSubSSH:
+		return len(a.snap.SSHSessions)
+	case advSubCron:
+		return len(a.snap.CronEntries)
+	case advSubStorage:
+		return len(a.snap.Volumes)
+	}
+	return 0
 }
 
 func (a *Advanced) doKillSession(sess advanced.SSHSession) tea.Cmd {

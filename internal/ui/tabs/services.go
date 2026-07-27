@@ -196,7 +196,10 @@ func (s *Services) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.cursor--
 		}
 	case "down", "j":
-		s.cursor++
+		max := s.maxItems()
+		if max > 0 && s.cursor < max-1 {
+			s.cursor++
+		}
 	case "/":
 		s.filterMode = !s.filterMode
 	case "esc":
@@ -270,6 +273,13 @@ func (s *Services) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return s, nil
+}
+
+func (s *Services) maxItems() int {
+	if s.panel == servicesSubPanelUnits {
+		return len(s.filteredUnits())
+	}
+	return 0
 }
 
 func (s *Services) fetchLogsCmd(unitName string) tea.Cmd {

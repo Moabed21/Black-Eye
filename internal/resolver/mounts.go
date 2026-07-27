@@ -34,10 +34,13 @@ func Mount(path string) string {
 		return label
 	}
 
-	// Partial match: /var/lib/docker/... → use the closest parent label.
+	// Partial match: /var/lib/docker/... → use the closest parent label (excluding root /).
 	p := path
 	for p != "/" && p != "." {
 		p = filepath.Dir(p)
+		if p == "/" {
+			break
+		}
 		if label, ok := mountLabels[p]; ok {
 			// Show the full path but with the parent annotation.
 			base := filepath.Base(path)

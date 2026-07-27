@@ -2,7 +2,9 @@ package tabs
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -113,7 +115,13 @@ func (n *Network) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "down", "j":
 			max := 0
-			if n.panel == subPanelPorts && n.portsSnap != nil {
+			if n.panel == subPanelInterfaces && n.netSnap != nil {
+				for _, iface := range n.netSnap.Ifaces {
+					if n.filter == "" || strings.Contains(strings.ToLower(iface.DisplayName), strings.ToLower(n.filter)) {
+						max++
+					}
+				}
+			} else if n.panel == subPanelPorts && n.portsSnap != nil {
 				for _, l := range n.portsSnap.Listeners {
 					if n.filter == "" || strings.Contains(strings.ToLower(l.DisplayService), strings.ToLower(n.filter)) {
 						max++
@@ -125,9 +133,56 @@ func (n *Network) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						max++
 					}
 				}
+			} else if n.panel == subPanelRouting && n.routingSnap != nil {
+				for _, r := range n.routingSnap.Routes {
+					if n.filter == "" || strings.Contains(strings.ToLower(r.Destination), strings.ToLower(n.filter)) || strings.Contains(strings.ToLower(r.DisplayIface), strings.ToLower(n.filter)) {
+						max++
+					}
+				}
 			}
 			if max > 0 && n.cursor < max-1 {
 				n.cursor++
+			}
+		case "f":
+			if n.panel == subPanelPorts && n.portsSnap != nil && len(n.portsSnap.Listeners) > 0 {
+				idx := 0
+				for _, l := range n.portsSnap.Listeners {
+					if n.filter != "" && !strings.Contains(strings.ToLower(l.DisplayService), strings.ToLower(n.filter)) {
+						continue
+					}
+					if idx == n.cursor {
+						portStr := fmt.Sprintf("%d", l.RawPort)
+						protoStr := strings.ToLower(l.Protocol)
+						return n, func() tea.Msg {
+							return JumpToTabMsg{
+								TabIndex: 6, // TabFirewall
+								Payload: FirewallPrefill{
+									Port:   portStr,
+									Proto:  protoStr,
+									Action: "DROP",
+								},
+							}
+						}
+					}
+					idx++
+				}
+			}
+		case "k":
+			if n.panel == subPanelConnections && n.portsSnap != nil && len(n.portsSnap.Connections) > 0 {
+				idx := 0
+				for _, c := range n.portsSnap.Connections {
+					if n.filter != "" && !strings.Contains(strings.ToLower(c.RemoteDisplay), strings.ToLower(n.filter)) && !strings.Contains(strings.ToLower(c.LocalDisplay), strings.ToLower(n.filter)) && !strings.Contains(strings.ToLower(c.DisplayProcess), strings.ToLower(n.filter)) {
+						continue
+					}
+					if idx == n.cursor && c.PID > 0 {
+						proc, err := os.FindProcess(c.PID)
+						if err == nil {
+							_ = proc.Signal(syscall.SIGTERM)
+						}
+						break
+					}
+					idx++
+				}
 			}
 		case "/":
 			n.filterMode = !n.filterMode
@@ -225,7 +280,7 @@ func (n *Network) viewInterfaces() string {
 }
 
 func (n *Network) viewListeners() string {
-	title := styles.PanelTitleStyle.Render("  Listening Services")
+	title := styles.PanelTitleStyle.Render("  Listening Services (press 'f' to add firewall rule)")
 	if n.portsSnap == nil {
 		return title + "\n  Loading…"
 	}
@@ -243,11 +298,13 @@ func (n *Network) viewListeners() string {
 		if filteredIdx == n.cursor {
 			style = styles.TableRowSelected
 		}
-		if l.Flagged {
+		if l.Flagged || l.IsUnencrypted {
 			style = styles.TableRowFlagged
 		}
 		flag := "  "
-		if l.Flagged {
+		if l.IsUnencrypted {
+			flag = styles.TextRed.Render("⚠ UNENCRYPTED ")
+		} else if l.Flagged {
 			flag = "⚠ "
 		}
 		rows = append(rows, style.Render(fmt.Sprintf("%s%-30s  %-5s  %-22s  %-20s  %-12s",
@@ -286,14 +343,14 @@ func (n *Network) viewListeners() string {
 }
 
 func (n *Network) viewConnections() string {
-	title := styles.PanelTitleStyle.Render("  Active Connections")
+	title := styles.PanelTitleStyle.Render("  Active Connections (press 'k' to terminate socket process)")
 	if n.portsSnap == nil {
 		return title + "\n  Loading…"
 	}
 	var rows []string
 	rows = append(rows, styles.TableHeader.Render(
-		fmt.Sprintf("%-36s  %-26s  %-28s  %-20s",
-			"Local", "Remote", "State", "Process"),
+		fmt.Sprintf("%-36s  %-26s  %-10s  %-24s  %-18s",
+			"Local", "Remote", "Scope", "State", "Process"),
 	))
 	filteredIdx := 0
 	for _, c := range n.portsSnap.Connections {
@@ -304,11 +361,16 @@ func (n *Network) viewConnections() string {
 		if filteredIdx == n.cursor {
 			style = styles.TableRowSelected
 		}
-		rows = append(rows, style.Render(fmt.Sprintf("%-36s  %-26s  %-28s  %-20s",
+		scopeBadge := styles.TextMuted.Render("🔒 LAN")
+		if c.IsPublicWAN {
+			scopeBadge = styles.TextYellow.Render("🌐 WAN")
+		}
+		rows = append(rows, style.Render(fmt.Sprintf("%-36s  %-26s  %-10s  %-24s  %-18s",
 			styles.Truncate(c.LocalDisplay, 36),
 			styles.Truncate(c.RemoteDisplay, 26),
-			styles.Truncate(c.DisplayState, 28),
-			styles.Truncate(c.DisplayProcess, 20),
+			scopeBadge,
+			styles.Truncate(c.DisplayState, 24),
+			styles.Truncate(c.DisplayProcess, 18),
 		)))
 		filteredIdx++
 	}

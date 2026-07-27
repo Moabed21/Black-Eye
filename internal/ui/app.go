@@ -59,6 +59,7 @@ type Model struct {
 	tabs      [TabCount]tea.Model
 	// Help modal state.
 	helpOpen         bool
+	helpViewMode     int // 0 = Active Tab Context Help, 1 = Global Cheat Sheet
 	helpScrollOffset int
 	cfg              config.Config
 
@@ -97,6 +98,13 @@ func (m *Model) GetTab(idx int) tea.Model {
 		return nil
 	}
 	return m.tabs[idx]
+}
+
+// SetActiveTab sets the initial active tab by index.
+func (m *Model) SetActiveTab(idx int) {
+	if idx >= 0 && idx < TabCount {
+		m.activeTab = idx
+	}
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -160,6 +168,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// tab's IsFocused() method is used during key routing.
 		return m, nil
 
+	case tabs.JumpToTabMsg:
+		if msg.TabIndex >= 0 && msg.TabIndex < TabCount {
+			m.activeTab = msg.TabIndex
+			if receiver, ok := m.tabs[msg.TabIndex].(tabs.PayloadReceiver); ok {
+				receiver.ReceivePayload(msg.Payload)
+			}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		// When the terminal tab is focused, forward ALL keys to it
 		// (including q, numbers, ctrl+c) — except that ctrl+c when NOT
@@ -175,6 +192,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.helpOpen {
 			if msg.String() == "?" || msg.String() == "q" || msg.String() == "esc" {
 				m.helpOpen = false
+				m.helpScrollOffset = 0
+				return m, nil
+			}
+			if msg.String() == "g" {
+				m.helpViewMode = (m.helpViewMode + 1) % 2
 				m.helpScrollOffset = 0
 				return m, nil
 			}
@@ -280,23 +302,34 @@ func (m *Model) View() string {
 		return styles.MinSizeWarning()
 	}
 
-	if m.helpOpen {
-		return m.renderHelp()
-	}
-
 	tabBar := m.renderTabBar()
 	content := m.tabs[m.activeTab].View()
 	statusBar := m.renderStatusBar()
 
-	// Clamp content height so total lines never exceed m.height
 	tabH := lipgloss.Height(tabBar)
 	statusH := lipgloss.Height(statusBar)
 	availH := m.height - tabH - statusH
-	if availH > 0 {
-		lines := strings.Split(content, "\n")
-		if len(lines) > availH {
-			lines = lines[:availH]
-			content = strings.Join(lines, "\n")
+
+	if m.helpOpen {
+		helpDrawer := m.renderHelpDrawer()
+		helpH := lipgloss.Height(helpDrawer)
+		mainAvailH := availH - helpH
+
+		if mainAvailH > 0 {
+			lines := strings.Split(content, "\n")
+			if len(lines) > mainAvailH {
+				lines = lines[:mainAvailH]
+				content = strings.Join(lines, "\n")
+			}
+		}
+		content = lipgloss.JoinVertical(lipgloss.Left, content, helpDrawer)
+	} else {
+		if availH > 0 {
+			lines := strings.Split(content, "\n")
+			if len(lines) > availH {
+				lines = lines[:availH]
+				content = strings.Join(lines, "\n")
+			}
 		}
 	}
 
@@ -364,8 +397,145 @@ func (m *Model) renderStatusBar() string {
 		Render(left + toast + spacer + right)
 	return bar
 }
+func (m *Model) renderHelpDrawer() string {
+	tabTitle := tabNames[m.activeTab]
+	tabBtn := styles.TabInactive.Render("Context Help (" + tabTitle + ") [g]")
+	globalBtn := styles.TabInactive.Render("Global Cheat Sheet [g]")
 
-func (m *Model) renderHelp() string {
+	if m.helpViewMode == 0 {
+		tabBtn = styles.TabActive.Render("Context Help (" + tabTitle + ") [g]")
+	} else {
+		globalBtn = styles.TabActive.Render("Global Cheat Sheet [g]")
+	}
+
+	modeBar := lipgloss.JoinHorizontal(lipgloss.Top, "  ", tabBtn, "   ", globalBtn)
+
+	var helpContent string
+	if m.helpViewMode == 0 {
+		helpContent = m.getTabHelpText(m.activeTab)
+	} else {
+		helpContent = m.getGlobalHelpText()
+	}
+
+	footer := styles.TextMuted.Render("  [g] toggle mode  │  ↑/↓ / PgUp scroll  │  Esc/? close help")
+
+	boxWidth := m.width - 4
+	if boxWidth < 40 {
+		boxWidth = 40
+	}
+
+	card := lipgloss.JoinVertical(lipgloss.Left,
+		modeBar,
+		"",
+		helpContent,
+		"",
+		footer,
+	)
+
+	return styles.PanelStyle.Copy().
+		Width(boxWidth).
+		BorderForeground(styles.ColorGold).
+		Render(card)
+}
+
+func (m *Model) getTabHelpText(idx int) string {
+	switch idx {
+	case TabDashboard:
+		return styles.PanelTitleStyle.Render("  [1] Dashboard — Contextual Help & Controls") + "\n\n" +
+			styles.TextBold.Render("Key Indicators & Telemetry:\n") +
+			"  • Security Risk Score: Dynamic 0–100% risk score matrix combining firewall, root SSH & brute-force IPs\n" +
+			"  • Rolling Sparklines: 2-minute rolling trend graphs for CPU%, RAM%, and network throughput\n" +
+			"  • Drag & Drop Panels: Click and drag panel headers to dynamically reorder dashboard layout\n\n" +
+			styles.TextBold.Render("Navigation:\n") +
+			"  • ↑/↓ / PgUp/PgDn: Scroll dashboard view when content exceeds window height"
+
+	case TabProcess:
+		return styles.PanelTitleStyle.Render("  [2] Processes — Contextual Help & Controls") + "\n\n" +
+			styles.TextBold.Render("Process Management Keys:\n") +
+			"  • ↑/↓ / j/k: Navigate process list\n" +
+			"  • t: Toggle Tree view (├── └── process hierarchy) vs Flat list\n" +
+			"  • s / F6: Open Sort Menu (CPU%, Memory%, I/O Rate, PID)\n" +
+			"  • r: Reverse current sort order\n" +
+			"  • /: Filter processes by name or user (ESC to clear)\n" +
+			"  • Enter: View detailed process metadata, open FDs, and live I/O rates\n" +
+			"  • k / F9: Open Process Signal Menu (SIGTERM 15, SIGKILL 9, SIGSTOP 19)"
+
+	case TabNetwork:
+		return styles.PanelTitleStyle.Render("  [3] Network & Sockets — Contextual Help & Controls") + "\n\n" +
+			styles.TextBold.Render("Sub-Panels & Security Badges:\n") +
+			"  • Tab: Cycle sub-panels (Interfaces, Listening Services, Active Connections, Routing Table)\n" +
+			"  • ⚠️ UNENCRYPTED: Red warning badge on unencrypted listener ports (HTTP 80, FTP 21, Telnet 23, POP3 110)\n" +
+			"  • 🌐 WAN vs 🔒 LAN: Automatic remote IP scope classification\n\n" +
+			styles.TextBold.Render("Incident Response Shortcuts:\n") +
+			"  • f: (Listeners) Jump directly to Tab 7 (Firewall) with pre-filled DROP rule wizard for highlighted port\n" +
+			"  • k: (Connections) Send SIGTERM to process PID owning highlighted socket"
+
+	case TabDocker:
+		return styles.PanelTitleStyle.Render("  [4] Docker Containers — Contextual Help & Controls") + "\n\n" +
+			styles.TextBold.Render("Container Lifecycle Keys:\n") +
+			"  • ↑/↓: Navigate containers\n" +
+			"  • Enter: View container metadata, volume mounts, and redacted env vars\n" +
+			"  • l: Tail live container stdout/stderr logs\n" +
+			"  • a: Start stopped container (requires confirmation)\n" +
+			"  • s: Stop container (requires confirmation)\n" +
+			"  • r: Restart container\n" +
+			"  • p: Pause / Unpause container\n" +
+			"  • d: Remove container (force removal)"
+
+	case TabServices:
+		return styles.PanelTitleStyle.Render("  [5] Services & Kernel Logs — Contextual Help & Controls") + "\n\n" +
+			styles.TextBold.Render("Unit Controls & Logs:\n") +
+			"  • Tab: Cycle sub-panels (Systemd Services, Kernel dmesg logs, Unit Logs)\n" +
+			"  • a / f / r: Filter unit status (all / failed / running)\n" +
+			"  • l: View journalctl logs for highlighted unit\n" +
+			"  • s: Start unit  │  x: Stop unit  │  r: Restart unit\n" +
+			"  • e: Enable on boot  │  d: Disable on boot  │  m: Mask unit"
+
+	case TabTerminal:
+		return styles.PanelTitleStyle.Render("  [6] Embedded Terminal — Contextual Help & Controls") + "\n\n" +
+			styles.TextBold.Render("Pseudoterminal (PTY) Modes:\n") +
+			"  • i / Enter: Focus terminal input mode (shell captures all keypresses)\n" +
+			"  • Esc Esc: Double-press Esc within 300ms to exit input mode\n" +
+			"  • PTY Job Control: Full support for sudo, htop, vim, starship, and job signals"
+
+	case TabFirewall:
+		return styles.PanelTitleStyle.Render("  [7] Firewall Manager — Contextual Help & Controls") + "\n\n" +
+			styles.TextBold.Render("Firewall Engine & Rule Keys:\n") +
+			"  • b: Engine Switcher — cycle live between ufw, firewalld, iptables, and nftables\n" +
+			"  • a: Launch Interactive Add Rule Wizard (port, action, protocol)\n" +
+			"  • d: Delete highlighted firewall rule (confirmation required)\n" +
+			"  • e: Toggle Firewall enable/disable state"
+
+	case TabPackages:
+		return styles.PanelTitleStyle.Render("  [8] Package Manager — Contextual Help & Controls") + "\n\n" +
+			styles.TextBold.Render("Package Manager Keys:\n") +
+			"  • b: Helper Switcher — cycle between pacman, yay, flatpak, snap, apt, dnf, etc.\n" +
+			"  • c: Category Filter — System Core (🛡️), User App (👤), Library (📦), Dev (🛠️)\n" +
+			"  • /: Search packages in repositories (Enter to execute search)\n" +
+			"  • Enter: Install highlighted package\n" +
+			"  • r: Remove highlighted package (prompts red System Core removal warning banner)\n" +
+			"  • u: System Upgrade — run full system upgrade (requires typing 'UPDATE ALL')"
+
+	case TabUsers:
+		return styles.PanelTitleStyle.Render("  [9] Users & Security — Contextual Help & Controls") + "\n\n" +
+			styles.TextBold.Render("Security Sub-Panels & Keys:\n") +
+			"  • Tab: Cycle sub-panels (Users, Groups, Sudoers, SUID/SGID Audit, SSH Policy)\n" +
+			"  • h: Toggle hiding system accounts (UID < 1000)\n" +
+			"  • a: (Users) Add user account  │  (Sudoers) Launch 3-step Sudoers Rule Wizard\n" +
+			"  • d: (Users) Delete user account  │  (Sudoers) Delete custom Sudoers drop-in rule\n" +
+			"  • visudo check: Automatic 'visudo -c' syntax validation before applying sudoers rules"
+
+	case TabAdvanced:
+		return styles.PanelTitleStyle.Render("  [0] Advanced Platform — Contextual Help & Controls") + "\n\n" +
+			styles.TextBold.Render("SSH Sessions & Incident Response:\n") +
+			"  • Tab: Cycle sub-panels (Active SSH Sessions, Cron & Timers, Storage Topology)\n" +
+			"  • k: Terminate active SSH login session PID\n" +
+			"  • b: Instant Firewall IP Ban — jump to Tab 7 (Firewall) with pre-filled DROP rule for session remote IP"
+	}
+	return m.getGlobalHelpText()
+}
+
+func (m *Model) getGlobalHelpText() string {
 	rawHelp := styles.TextBold.Render("Global Shortcuts\n") +
 		"  q / Ctrl+C   Quit application\n" +
 		"  1–9,0        Switch between tabs\n" +
@@ -391,7 +561,9 @@ func (m *Model) renderHelp() string {
 		styles.TextBold.Render("Network Tab (3)\n") +
 		"  Tab          Switch sub-panels (Interfaces, Sockets, Routes)\n" +
 		"  ↑/↓          Navigate items\n" +
-		"  /            Filter by interface/address/port\n\n" +
+		"  /            Filter by interface/address/port\n" +
+		"  f            Jump to Firewall tab to create rule for highlighted port\n" +
+		"  k            Send SIGTERM to process PID owning highlighted socket\n\n" +
 		styles.TextBold.Render("Docker Tab (4)\n") +
 		"  ↑/↓          Navigate containers\n" +
 		"  Enter        View container details & stats\n" +
@@ -447,19 +619,20 @@ func (m *Model) renderHelp() string {
 		"  r            Remove highlighted package (in Installed sub-panel)\n" +
 		"  u            Run full system package upgrade (requires typed confirmation)\n" +
 		"  ESC          Dismiss execution log output modal\n\n" +
-		styles.TextBold.Render("Users Tab (9)\n") +
-		"  Tab          Switch sub-panels (User Accounts, System Groups, Sudoers Rules)\n" +
+		styles.TextBold.Render("Users & Security Tab (9)\n") +
+		"  Tab          Switch sub-panels (Users, Groups, Sudoers, SUID/SGID Audit, SSH Policy)\n" +
 		"  h            Toggle hiding system users (UID < 1000)\n" +
-		"  a            Add new user account (root required)\n" +
-		"  d            Delete user account (root required + confirmation)\n\n" +
+		"  a            Add user account OR launch Add Sudoers Rule Wizard (root required)\n" +
+		"  d            Delete user account OR delete custom Sudoers drop-in rule (root required)\n\n" +
 		styles.TextBold.Render("Advanced Tab (0)\n") +
 		"  Tab          Switch sub-panels (Active SSH Sessions, Cron & Timers, Storage Topology)\n" +
-		"  k            Terminate highlighted active SSH login session (root / CAP_KILL required)\n"
+		"  k            Terminate highlighted active SSH login session (root / CAP_KILL required)\n" +
+		"  b            Instant Firewall IP Ban for highlighted SSH session remote IP\n"
 
 	lines := strings.Split(rawHelp, "\n")
 	total := len(lines)
 
-	viewH := m.height - 7
+	viewH := m.height - 12
 	if viewH < 5 {
 		viewH = 5
 	}
@@ -480,15 +653,8 @@ func (m *Model) renderHelp() string {
 		end = total
 	}
 	visibleLines := lines[m.helpScrollOffset:end]
-
-	scrollIndicator := styles.TextMuted.Render("  ↑/↓ / PgUp/PgDn scroll guide  │  Esc/? close help")
 	if maxOffset > 0 {
-		scrollIndicator = styles.TextMuted.Render(fmt.Sprintf("  ↑/↓ / PgUp/PgDn scroll (+%d/%d)  │  Esc/? close help", m.helpScrollOffset, maxOffset))
+		return strings.Join(visibleLines, "\n") + "\n" + styles.TextMuted.Render(fmt.Sprintf("  (Scroll offset: +%d/%d)", m.helpScrollOffset, maxOffset))
 	}
-
-	content := strings.Join(visibleLines, "\n") + "\n\n" + scrollIndicator
-
-	return styles.PanelStyle.Copy().Width(m.width - 2).Render(
-		styles.PanelTitleStyle.Render("? Help — Keyboard Shortcuts & Usage Guide") + "\n\n" + content,
-	)
+	return strings.Join(visibleLines, "\n")
 }
