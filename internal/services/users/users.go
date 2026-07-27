@@ -256,3 +256,47 @@ func DeleteUser(username string) error {
 	}
 	return nil
 }
+
+// AddSudoRule creates a validated drop-in sudoers rule file in /etc/sudoers.d/
+func AddSudoRule(targetUser, command string, noPass bool) error {
+	if strings.TrimSpace(targetUser) == "" || strings.TrimSpace(command) == "" {
+		return fmt.Errorf("invalid user or command")
+	}
+
+	sanitizedUser := strings.ReplaceAll(targetUser, " ", "_")
+	dropInPath := filepath.Join("/etc/sudoers.d", "blackeye_"+sanitizedUser)
+
+	ruleContent := fmt.Sprintf("%s ALL=(ALL:ALL) ", targetUser)
+	if noPass {
+		ruleContent += "NOPASSWD: "
+	}
+	ruleContent += fmt.Sprintf("%s\n", command)
+
+	// Write drop-in file
+	err := os.WriteFile(dropInPath, []byte(ruleContent), 0440)
+	if err != nil {
+		return fmt.Errorf("write /etc/sudoers.d: %w", err)
+	}
+
+	// Validate syntax with visudo -c -f
+	if visudoPath, err := exec.LookPath("visudo"); err == nil {
+		cmd := exec.Command(visudoPath, "-c", "-f", dropInPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			_ = os.Remove(dropInPath) // rollback invalid file
+			return fmt.Errorf("sudoers syntax validation failed: %s", strings.TrimSpace(string(out)))
+		}
+	}
+
+	return nil
+}
+
+// DeleteSudoRule removes a custom sudoers drop-in file or rule.
+func DeleteSudoRule(rule SudoRule) error {
+	if rule.Source != "" && rule.Source != "sudoers" && rule.Source != "/etc/sudoers" {
+		targetFile := filepath.Join("/etc/sudoers.d", rule.Source)
+		if err := os.Remove(targetFile); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("cannot remove default /etc/sudoers rules directly; edit /etc/sudoers via visudo")
+}

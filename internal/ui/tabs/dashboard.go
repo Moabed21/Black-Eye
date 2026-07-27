@@ -12,9 +12,11 @@ import (
 	"blackeye/internal/resolver"
 	"blackeye/internal/services/cpu"
 	"blackeye/internal/services/disk"
+	"blackeye/internal/services/firewall"
 	iosvc "blackeye/internal/services/io"
 	"blackeye/internal/services/memory"
 	"blackeye/internal/services/network"
+	"blackeye/internal/services/security"
 	"blackeye/internal/services/swap"
 	"blackeye/internal/services/sysinfo"
 	"blackeye/internal/services/thermal"
@@ -22,7 +24,7 @@ import (
 )
 
 // Dashboard is the Tab 1 model. It subscribes to:
-// cpu, memory, swap, disk, io, network, thermal, sysinfo
+// cpu, memory, swap, disk, io, network, thermal, sysinfo, firewall, security
 type Dashboard struct {
 	width  int
 	height int
@@ -38,6 +40,8 @@ type Dashboard struct {
 	netSnap     *network.Snapshot
 	thermalSnap *thermal.Snapshot
 	sysSnap     *sysinfo.Snapshot
+	fwSnap      *firewall.Snapshot
+	secSnap     *security.Snapshot
 
 	// Bus subscriptions.
 	subCPU     <-chan interface{}
@@ -48,6 +52,8 @@ type Dashboard struct {
 	subNet     <-chan interface{}
 	subThermal <-chan interface{}
 	subSys     <-chan interface{}
+	subFw      <-chan interface{}
+	subSec     <-chan interface{}
 
 	// Scroll state.
 	scrollOffset int
@@ -80,13 +86,13 @@ func NewDashboard(b *bus.Bus, cfg config.Config) *Dashboard {
 	d.subNet = b.Subscribe("network")
 	d.subThermal = b.Subscribe("thermal")
 	d.subSys = b.Subscribe("sysinfo")
+	d.subFw = b.Subscribe("firewall")
+	d.subSec = b.Subscribe("security")
 	
 	// Default layout: stacked vertically.
 	d.layout = [][]string{
-		{"sysinfo"},
-		{"cpu"},
-		{"memory"},
-		{"disk"},
+		{"sysinfo", "cpu"},
+		{"mem", "disk"},
 		{"network"},
 	}
 	d.bounds = make(map[string]PanelBounds)
@@ -110,6 +116,8 @@ func (d *Dashboard) Init() tea.Cmd {
 		listenChan(d.subNet, "network"),
 		listenChan(d.subThermal, "thermal"),
 		listenChan(d.subSys, "sysinfo"),
+		listenChan(d.subFw, "firewall"),
+		listenChan(d.subSec, "security"),
 	)
 }
 
@@ -154,11 +162,11 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Update per-interface sparklines.
 				for _, iface := range v.Ifaces {
 					if _, ok := d.netRxHist[iface.DisplayName]; !ok {
-						d.netRxHist[iface.DisplayName] = styles.NewSparkline(60, 0, 0) // auto-scale max to peak throughput
-						d.netTxHist[iface.DisplayName] = styles.NewSparkline(60, 0, 0)
+						d.netRxHist[iface.DisplayName] = styles.NewSparkline(40, 0, 0)
+						d.netTxHist[iface.DisplayName] = styles.NewSparkline(40, 0, 0)
 					}
-					d.netRxHist[iface.DisplayName].Push(iface.RxMBs)
-					d.netTxHist[iface.DisplayName].Push(iface.TxMBs)
+					d.netRxHist[iface.DisplayName].Push(iface.RxBps)
+					d.netTxHist[iface.DisplayName].Push(iface.TxBps)
 				}
 			}
 			cmd = listenChan(d.subNet, "network")
@@ -172,6 +180,16 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.sysSnap = &v
 			}
 			cmd = listenChan(d.subSys, "sysinfo")
+		case d.subFw:
+			if v, ok := m.data.(firewall.Snapshot); ok {
+				d.fwSnap = &v
+			}
+			cmd = listenChan(d.subFw, "firewall")
+		case d.subSec:
+			if v, ok := m.data.(security.Snapshot); ok {
+				d.secSnap = &v
+			}
+			cmd = listenChan(d.subSec, "security")
 		}
 		return d, cmd
 	case tea.KeyMsg:
@@ -423,7 +441,40 @@ func (d *Dashboard) renderSysInfo(targetWidth, targetHeight int) string {
 		s.CPUModel, s.CPUCores, s.CPUThreads)
 	line3 := fmt.Sprintf("  Load avg:  1m: %.2f  │  5m: %.2f  │  15m: %.2f",
 		s.LoadAvg1, s.LoadAvg5, s.LoadAvg15)
-	return style.Render(title + "\n" + line1 + "\n" + line2 + "\n" + line3)
+
+	secScore := 0
+	if d.fwSnap != nil && !d.fwSnap.IsEnabled {
+		secScore += 25
+	}
+	if d.secSnap != nil {
+		if d.secSnap.SSHConfig.PermitRootLogin == "yes" {
+			secScore += 15
+		}
+		if d.secSnap.SSHConfig.PasswordAuthentication == "yes" {
+			secScore += 10
+		}
+		if len(d.secSnap.BruteForceIPs) > 0 {
+			secScore += 15
+		}
+	}
+	if secScore > 100 {
+		secScore = 100
+	}
+	scoreStyle := styles.TextGreen
+	scoreGrade := "LOW RISK"
+	if secScore >= 75 {
+		scoreStyle = styles.TextRed
+		scoreGrade = "CRITICAL RISK"
+	} else if secScore >= 50 {
+		scoreStyle = styles.TextYellow
+		scoreGrade = "HIGH RISK"
+	} else if secScore >= 25 {
+		scoreStyle = styles.TextYellow
+		scoreGrade = "MODERATE RISK"
+	}
+	line4 := fmt.Sprintf("  Security Risk Score: %s (%s)", scoreStyle.Render(fmt.Sprintf("%d/100", secScore)), scoreStyle.Render(scoreGrade))
+
+	return style.Render(title + "\n" + line1 + "\n" + line2 + "\n" + line3 + "\n" + line4)
 }
 
 func (d *Dashboard) renderCPU(targetWidth, targetHeight int) string {

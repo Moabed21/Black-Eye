@@ -205,7 +205,10 @@ func (p *Packages) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			p.cursor--
 		}
 	case "down", "j":
-		p.cursor++
+		max := p.maxItems()
+		if max > 0 && p.cursor < max-1 {
+			p.cursor++
+		}
 	case "c":
 		// Cycle category filter: All -> System Core -> User App -> Library -> Dev
 		p.catFilterIdx = (p.catFilterIdx + 1) % 5
@@ -259,6 +262,20 @@ func (p *Packages) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return p, nil
+}
+
+func (p *Packages) maxItems() int {
+	switch p.panel {
+	case pkgSubInstalled:
+		return len(p.filteredInstalled())
+	case pkgSubSearch:
+		return len(p.searchResults)
+	case pkgSubUpdates:
+		if p.snap != nil {
+			return len(p.snap.Installed)
+		}
+	}
+	return 0
 }
 
 func (p *Packages) doSearch(query string) tea.Cmd {

@@ -37,6 +37,7 @@ import (
 	portssvc  "blackeye/internal/services/ports"
 	routingsvc "blackeye/internal/services/routing"
 	swapsvc   "blackeye/internal/services/swap"
+	securitysvc "blackeye/internal/services/security"
 	sysinfosvc "blackeye/internal/services/sysinfo"
 	systemdsvc "blackeye/internal/services/systemd"
 	thermalsvc "blackeye/internal/services/thermal"
@@ -73,6 +74,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "blackeye: warning: cannot parse /etc/passwd: %v\n", err)
 	}
 
+	// Check CLI export / health mode
+	for _, arg := range os.Args[1:] {
+		if arg == "--export" || arg == "--export=json" || arg == "--health" {
+			h, _ := os.Hostname()
+			fmt.Printf("{\n  \"version\": \"1.3.0\",\n  \"status\": \"healthy\",\n  \"hostname\": %q,\n  \"distro\": %q\n}\n", h, sysdetect.Profile().DistroName)
+			return
+		}
+	}
+
 	// 4. Create the event bus.
 	b := bus.New()
 
@@ -97,6 +107,7 @@ func main() {
 	pkgs := pkgsvc.New(cfg)
 	usrSvc := usersvc.New(cfg)
 	advSvc := advancedsvc.New(cfg)
+	secSvc := securitysvc.New(cfg)
 	dmesg := dmesgsvc.New(cfg)
 	alertsMon := alertssvc.New(b, cfg)
 
@@ -120,6 +131,7 @@ func main() {
 	reg.Register(pkgs)
 	reg.Register(usrSvc)
 	reg.Register(advSvc)
+	reg.Register(secSvc)
 	reg.Register(dmesg)
 
 	ctx, cancelSvcs := context.WithCancel(context.Background())
@@ -141,6 +153,24 @@ func main() {
 
 	// 7. Build the TUI root model.
 	root := ui.New(b, cfg)
+
+	// Sub-command / CLI tab focus parsing
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "net", "--tab=network":
+			root.SetActiveTab(ui.TabNetwork)
+		case "sec", "--tab=security":
+			root.SetActiveTab(ui.TabUsers)
+		case "pkg", "--tab=packages":
+			root.SetActiveTab(ui.TabPackages)
+		case "proc", "--tab=process":
+			root.SetActiveTab(ui.TabProcess)
+		case "term", "--tab=terminal":
+			root.SetActiveTab(ui.TabTerminal)
+		case "fw", "--tab=firewall":
+			root.SetActiveTab(ui.TabFirewall)
+		}
+	}
 
 	// Wire audit service into tabs that perform destructive actions.
 	if procTab, ok := root.GetTab(ui.TabProcess).(*uitabs.Process); ok {

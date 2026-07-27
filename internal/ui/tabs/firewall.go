@@ -60,6 +60,30 @@ type Firewall struct {
 	activeBackendIdx int
 }
 
+type FirewallPrefill struct {
+	Port   string
+	Source string
+	Proto  string
+	Action string
+}
+
+func (f *Firewall) ReceivePayload(payload interface{}) {
+	if pf, ok := payload.(FirewallPrefill); ok {
+		f.addMode = true
+		f.addStep = 0
+		if pf.Port != "" {
+			f.addPort = pf.Port
+		}
+		if pf.Action != "" {
+			f.addAction = pf.Action
+		}
+		if pf.Proto != "" {
+			f.addProto = pf.Proto
+		}
+		f.statusMsg = styles.TextYellow.Render(fmt.Sprintf("Rule Wizard pre-filled (Port: %s, Action: %s, Proto: %s)", f.addPort, f.addAction, f.addProto))
+	}
+}
+
 func NewFirewall(b *bus.Bus, cfg config.Config) *Firewall {
 	backends := firewall.AvailableFirewallBackends()
 	return &Firewall{
@@ -176,7 +200,10 @@ func (f *Firewall) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			f.cursor--
 		}
 	case "down", "j":
-		f.cursor++
+		max := f.maxItems()
+		if max > 0 && f.cursor < max-1 {
+			f.cursor++
+		}
 	case "b":
 		if len(f.backends) > 0 {
 			f.activeBackendIdx = (f.activeBackendIdx + 1) % len(f.backends)
@@ -211,6 +238,13 @@ func (f *Firewall) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return f, nil
+}
+
+func (f *Firewall) maxItems() int {
+	if f.panel == firewallSubRules {
+		return len(f.filteredRules())
+	}
+	return 3
 }
 
 func (f *Firewall) getActiveBackend() firewall.FirewallBackend {

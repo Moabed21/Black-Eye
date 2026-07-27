@@ -31,3 +31,18 @@ func TestUsersServiceStartStop(t *testing.T) {
 		t.Fatal("timeout waiting for users snapshot")
 	}
 }
+
+func TestSudoersRuleValidation(t *testing.T) {
+	// Verify input validation for AddSudoRule
+	err := usersvc.AddSudoRule("", "", false)
+	if err == nil {
+		t.Error("expected error for empty user and command")
+	}
+
+	// Verify DeleteSudoRule safety check for default /etc/sudoers
+	rule := usersvc.SudoRule{Source: "/etc/sudoers"}
+	err = usersvc.DeleteSudoRule(rule)
+	if err == nil {
+		t.Error("expected error when attempting to delete main /etc/sudoers file")
+	}
+}
