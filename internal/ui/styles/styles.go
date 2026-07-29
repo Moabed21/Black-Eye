@@ -7,6 +7,7 @@ package styles
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -135,11 +136,10 @@ func Bar(pct float64, width int, warn, crit float64) string {
 
 // RepeatStr repeats string s n times.
 func RepeatStr(s string, n int) string {
-	out := ""
-	for i := 0; i < n; i++ {
-		out += s
+	if n <= 0 {
+		return ""
 	}
-	return out
+	return strings.Repeat(s, n)
 }
 
 // Colorize returns text colored by percentage threshold.
@@ -172,12 +172,17 @@ func MinSizeWarning() string {
 		Render("⚠  Terminal too small. Please resize to at least 80×24 columns.")
 }
 
-// Truncate shortens a string to n characters with an ellipsis.
+// Truncate shortens a string to n visible characters with an ellipsis.
+// Uses rune slicing to avoid cutting multi-byte UTF-8 characters mid-sequence.
 func Truncate(s string, n int) string {
-	if len(s) <= n {
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	if n <= 1 {
+		return "…"
+	}
+	return string(runes[:n-1]) + "…"
 }
 
 // FmtPercent formats a float64 percentage with one decimal place.

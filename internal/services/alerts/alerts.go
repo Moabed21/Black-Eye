@@ -283,8 +283,12 @@ func (s *Service) setAlert(key string, alert Alert) {
 	s.mu.Lock()
 	s.active[key] = alert
 	s.history = append([]Alert{alert}, s.history...)
-	if len(s.history) > 50 {
-		s.history = s.history[:50]
+	maxHist := s.cfg.Alerts.MaxHistory
+	if maxHist <= 0 {
+		maxHist = 50
+	}
+	if len(s.history) > maxHist {
+		s.history = s.history[:maxHist]
 	}
 	s.publishLocked()
 	s.mu.Unlock()

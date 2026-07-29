@@ -1,6 +1,10 @@
 package styles
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"sync"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 type Theme struct {
 	Name       string
@@ -104,13 +108,27 @@ var AvailableThemes = []Theme{
 
 var ActiveThemeIdx = 0
 
+// themeMu protects all global color/style variables during live theme switching.
+var themeMu sync.RWMutex
+
+// CycleTheme advances to the next theme and applies it atomically.
 func CycleTheme() string {
+	themeMu.Lock()
+	defer themeMu.Unlock()
 	ActiveThemeIdx = (ActiveThemeIdx + 1) % len(AvailableThemes)
-	ApplyTheme(AvailableThemes[ActiveThemeIdx])
+	applyThemeLocked(AvailableThemes[ActiveThemeIdx])
 	return AvailableThemes[ActiveThemeIdx].Name
 }
 
+// ApplyTheme applies the given theme atomically. It is goroutine-safe.
 func ApplyTheme(t Theme) {
+	themeMu.Lock()
+	defer themeMu.Unlock()
+	applyThemeLocked(t)
+}
+
+// applyThemeLocked sets all globals — caller must hold themeMu write lock.
+func applyThemeLocked(t Theme) {
 	ColorNavy = t.Navy
 	ColorGold = t.Gold
 	ColorNavyLight = t.NavyLight

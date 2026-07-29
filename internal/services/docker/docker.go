@@ -102,6 +102,9 @@ func (s *Service) client() *client.Client {
 func (s *Service) setClient(cli *client.Client) {
 	s.cliMu.Lock()
 	defer s.cliMu.Unlock()
+	if s.cli != nil && s.cli != cli {
+		s.cli.Close()
+	}
 	s.cli = cli
 }
 

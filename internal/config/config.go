@@ -81,6 +81,7 @@ type AlertsConfig struct {
 	DiskCritical   float64      `toml:"disk_critical"`
 	TempWarning    float64      `toml:"temp_warning"`
 	TempCritical   float64      `toml:"temp_critical"`
+	MaxHistory     int          `toml:"max_history"`
 	CustomRules    []CustomRule `toml:"custom_rules"`
 }
 
@@ -129,6 +130,7 @@ func Defaults() Config {
 			DiskCritical:   95.0,
 			TempWarning:    70.0,
 			TempCritical:   85.0,
+			MaxHistory:     50,
 		},
 		Ports: PortsConfig{
 			TrustedPorts: []uint16{22, 80, 443, 5432},

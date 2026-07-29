@@ -3,7 +3,6 @@ package sysdetect
 import (
 	"os"
 	"strings"
-	"golang.org/x/sys/unix"
 )
 
 // probeFile returns true if the path exists and is accessible (file or dir).
@@ -57,25 +56,4 @@ func containsAny(s string, subs ...string) bool {
 		}
 	}
 	return false
-}
-
-// hasCapability checks if the current process has a specific Linux capability.
-// capNum is the capability number (e.g., 5 for CAP_KILL, 12 for CAP_NET_ADMIN).
-func hasCapability(capNum uint) bool {
-	hdr := unix.CapUserHeader{
-		Version: unix.LINUX_CAPABILITY_VERSION_3,
-		Pid:     0, // 0 = self
-	}
-	var data [2]unix.CapUserData
-	if err := unix.Capget(&hdr, &data[0]); err != nil {
-		return false
-	}
-	// Capabilities are split across two uint32 values:
-	// data[0] covers caps 0-31, data[1] covers caps 32-63.
-	idx := capNum / 32
-	bit := uint32(1 << (capNum % 32))
-	if idx > 1 {
-		return false
-	}
-	return data[idx].Effective&bit != 0
 }

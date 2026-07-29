@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,7 @@ type Service struct {
 	interval time.Duration
 	out      chan interface{}
 	health   atomic.Value
+	mu       sync.Mutex
 	cancel   context.CancelFunc
 }
 
@@ -50,12 +52,17 @@ func (s *Service) Output() <-chan interface{}     { return s.out }
 func (s *Service) Health() services.HealthStatus { return s.health.Load().(services.HealthStatus) }
 func (s *Service) Stop()   { if s.cancel != nil { s.cancel() } }
 func (s *Service) Reload(cfg config.Config) {
+	s.mu.Lock()
 	s.interval = time.Duration(cfg.Refresh.DashboardInterval) * time.Second
+	s.mu.Unlock()
 }
 
 func (s *Service) Start(ctx context.Context) error {
 	ctx, s.cancel = context.WithCancel(ctx)
-	ticker := time.NewTicker(s.interval)
+	s.mu.Lock()
+	interval := s.interval
+	s.mu.Unlock()
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
